@@ -27,7 +27,7 @@ def build_network(Cm=100,sim_time=1000, second_sine=False, noisy=True, common_no
                   V_thresh=-50.0, E_m=-60.0, tau_m=10, weight=1, tau_syn_ex=2, 
                   seed=np.random.randint(0,1e6), beat=20, resolution=0.25,
                   measure_from_A=False, num_A=1000, neuron_type="iaf_psc_alpha", num_raster=100,
-                  tau_fac=0.0, tau_rec=800.0):
+                  tau_fac=0.0, tau_rec=800.0, U=0.5):
     
     """This function builds the network as described in the Methods-section. 
     It creates neurons and measuring devices, connections and runs the simulation.
@@ -134,10 +134,10 @@ def build_network(Cm=100,sim_time=1000, second_sine=False, noisy=True, common_no
         random_delays = positive_normal(delay_mean, delay_sd, len(nodes_A), resolution)
     
         for idx, node in enumerate(nodes_A):
-            nest.Connect(node, node_B, syn_spec={"weight": weight, 
+            nest.Connect(node, node_B, syn_spec={"weight": weight/U, 
                                                  "delay" : random_delays[idx],
                                                  "synapse_model": "tsodyks_synapse",
-                                                 "U": 0.5, # fraction determining the increase in u with each spike
+                                                 "U": U, # fraction determining the increase in u with each spike
                                                  "u": 0.0, # initial release probability of synaptic vesicles
                                                  "x": 1.0, # initial fraction of synaptic vesicles in the readily releasable pool
                                                  "y": 0.0, # fraction of synaptic vesicles in the active state
@@ -147,10 +147,10 @@ def build_network(Cm=100,sim_time=1000, second_sine=False, noisy=True, common_no
                                                  
     
     else:
-        nest.Connect(nodes_A, node_B, syn_spec={"weight": weight, 
+        nest.Connect(nodes_A, node_B, syn_spec={"weight": weight/U,
                                                 "delay" : delay_mean,
                                                 "synapse_model": "tsodyks_synapse",
-                                                "U": 0.5, # fraction determining the increase in u with each spike
+                                                "U": U, # fraction determining the increase in u with each spike
                                                 "u": 0.0, # initial release probability of synaptic vesicles
                                                 "x": 1.0, # initial fraction of synaptic vesicles in the readily releasable pool
                                                 "y": 0.0, # fraction of synaptic vesicles in the active state

@@ -134,8 +134,8 @@ def build_simulation(sim_time=1000, second_sine=False, noisy=True,
         "Vm": V_m,
         "V_th": V_thresh,
         "sim_time" : sim_time,
-        "times" : times
-        
+        "times" : times,
+        "Spike_rate" : len(ts)/sim_time*1000
     }
     
     return results

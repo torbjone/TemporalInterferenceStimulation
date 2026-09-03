@@ -19,7 +19,7 @@ def positive_normal(mu, std, size, resolution):
         delays[delays < resolution] = np.random.normal(mu, std, np.sum(delays < resolution))
     return delays
 
-def build_network(Cm=100,sim_time=1000, second_sine=False, noisy=True, common_noise=False,
+def build_network(Cm_B=100, Cm_A=100,sim_time=1000, second_sine=False, noisy=True, common_noise=False,
                   f1=10.0, a=100.0, SD=250.0, delay_mean=1, delay_sd=0.25,
                   V_thresh=-50.0, E_m=-60.0, tau_m=10, weight=1, tau_syn_ex=2, 
                   seed=np.random.randint(0,1e6), beat=20, resolution=0.25,
@@ -58,8 +58,8 @@ def build_network(Cm=100,sim_time=1000, second_sine=False, noisy=True, common_no
     })
     nest.set_verbosity("M_WARNING")
     
-    params = {
-        "C_m": Cm,
+    params_A = {
+        "C_m": Cm_A,
         "tau_m": tau_m,
         "E_L": -60.0,
         "V_reset": E_m,
@@ -69,19 +69,33 @@ def build_network(Cm=100,sim_time=1000, second_sine=False, noisy=True, common_no
         "t_ref" : 2,
         "tau_syn_ex" : tau_syn_ex
     }
+
+    params_B = {
+            "C_m": Cm_B,
+            "tau_m": tau_m,
+            "E_L": -60.0,
+            "V_reset": E_m,
+            "V_th": V_thresh,
+            "V_m": E_m,
+            "I_e" : 0,
+            "t_ref" : 2,
+            "tau_syn_ex" : tau_syn_ex
+        }
     
     if neuron_type == "iaf_psc_delta":
-        params.pop("tau_syn_ex")
+        params_A.pop("tau_syn_ex")
+        params_B.pop("tau_syn_ex")
     
     if neuron_type == "iaf_cond_exp":
-        params.pop("tau_m")
+        params_A.pop("tau_m")
+        params_B.pop("tau_m")
     
     # Creating neurons, current generators and recording devices
-    nodes_A = nest.Create(neuron_type, num_A, params=params)
-    node_B = nest.Create(neuron_type, 1, params=params)
-    
-    
-    
+    nodes_A = nest.Create(neuron_type, num_A, params=params_A)
+    node_B = nest.Create(neuron_type, 1, params=params_B)
+
+
+
     sinus_1 = nest.Create(
             "ac_generator",
             params={"amplitude": a, "frequency": f1})
