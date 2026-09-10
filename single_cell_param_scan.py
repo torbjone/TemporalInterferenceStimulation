@@ -15,6 +15,7 @@ import os
 
 import numpy as np
 import matplotlib.pyplot as plt
+from matplotlib.colors import LogNorm
 
 from single_cell_simulations import (
     run_single_cell_simulation,
@@ -84,36 +85,54 @@ def run_param_scan(target_stim_dVms, noise_level_Vms, const_params,
 
 def plot_param_scan(firing_rate, fr_power, fr_SNR,
                     target_stim_dVms, noise_level_Vms,
-                    analysis_freq=20.0, save_name="param_scan.png"):
-    """Plot the three scan matrices as color panels (imshow).
+                    analysis_freq=20.0, save_name="param_scan.png",
+                    snr_levels=None, n_levels=14):
+    """Plot the three scan matrices as filled contour panels (contourf).
 
     Noise level is placed on the x-axis and target stim dVm on the y-axis. The
     matrices are stored as [noise, dVm], so each is transposed to [dVm, noise]
-    before plotting."""
-    # With a uniform (linspace) grid, map array indices to data coordinates via
-    # `extent` + origin='lower', so the bottom-left cell is (min noise, min dVm)
-    # and each cell is centred on its parameter value.
-    dx = (noise_level_Vms[1] - noise_level_Vms[0]) / 2 if len(noise_level_Vms) > 1 else 0.5
-    dy = (target_stim_dVms[1] - target_stim_dVms[0]) / 2 if len(target_stim_dVms) > 1 else 0.5
-    extent = [noise_level_Vms[0] - dx, noise_level_Vms[-1] + dx,
-              target_stim_dVms[0] - dy, target_stim_dVms[-1] + dy]
+    before plotting.
 
+    `snr_levels` sets the contour boundaries for the SNR panel (a logarithmic
+    colour scale is matched to them, with labelled contour lines overlaid); it
+    defaults to a log-spaced set if not given. The firing-rate and power panels
+    use `n_levels` automatically-placed levels."""
+    if snr_levels is None:
+        snr_levels = [0.5, 1, 2, 5, 10, 20, 50, 100, 200, 500]
+    snr_levels = np.asarray(snr_levels, dtype=float)
+
+    # Grid of data coordinates: x = noise level, y = target stim dVm. Each
+    # matrix is transposed from [noise, dVm] to [dVm, noise] to match (Y, X).
+    X, Y = np.meshgrid(noise_level_Vms, target_stim_dVms)
+
+    # (matrix, title, levels, log_scale) - the SNR panel uses manual levels on
+    # a logarithmic colour scale; the others use automatic linear levels.
     panels = [
-        (firing_rate, "Firing rate (Hz)"),
-        (fr_power, f"Firing-rate power at {analysis_freq:.0f} Hz"),
-        (fr_SNR, f"Firing-rate SNR at {analysis_freq:.0f} Hz"),
+        (firing_rate, "Firing rate (Hz)", n_levels, False),
+        (fr_power, f"Firing-rate power at {analysis_freq:.0f} Hz", n_levels, False),
+        (fr_SNR, f"Firing-rate SNR at {analysis_freq:.0f} Hz", snr_levels, True),
     ]
 
     fig, axes = plt.subplots(1, 3, figsize=(16, 4.8))
     fig.subplots_adjust(wspace=0.35, left=0.06, right=0.97, bottom=0.15, top=0.9)
 
-    for ax, (matrix, title) in zip(axes, panels):
-        im = ax.imshow(matrix.T, origin="lower", aspect="auto", extent=extent,
-                       cmap="hot", interpolation="nearest")
+    for ax, (matrix, title, levels, log_scale) in zip(axes, panels):
+        Z = matrix.T
+        if log_scale:
+            # Match the colour normalisation to the manual level range; extend
+            # both ends so out-of-range cells still get the end colours.
+            norm = LogNorm(vmin=levels[0], vmax=levels[-1])
+            cf = ax.contourf(X, Y, Z, levels=levels, norm=norm, cmap="hot",
+                             extend="both")
+            # Overlay labelled contour lines for readability.
+            cl = ax.contour(X, Y, Z, levels=levels, colors="k", linewidths=0.4)
+            ax.clabel(cl, fmt="%g", fontsize=7)
+        else:
+            cf = ax.contourf(X, Y, Z, levels=levels, cmap="hot")
         ax.set_title(title)
         ax.set_xlabel("noise level Vm (mV)")
         ax.set_ylabel("target stim dVm (mV)")
-        fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+        fig.colorbar(cf, ax=ax, fraction=0.046, pad=0.04)
 
     simplify_axes(list(axes))
     fig.savefig(save_name, dpi=150)
@@ -143,7 +162,7 @@ if __name__ == "__main__":
     target_stim_dVms = np.linspace(0, 1, 17)   # mV
     noise_level_Vms = np.linspace(3, 9, 16)    # mV
 
-    rerun_scan = True
+    rerun_scan = False
 
     if rerun_scan:
         firing_rate, fr_power, fr_SNR = run_param_scan(
@@ -174,4 +193,4 @@ if __name__ == "__main__":
     plot_param_scan(firing_rate, fr_power, fr_SNR,
                     target_stim_dVms, noise_level_Vms,
                     analysis_freq=analysis_freq,
-                    save_name="param_scan.png")
+                    save_name="param_scan_log.png")
