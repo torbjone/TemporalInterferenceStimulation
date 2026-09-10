@@ -8,3 +8,6 @@ __pycache__/
 __pycache__/
 *.py[cod]
 results/
+*.png
+*.pdf
+*.npy

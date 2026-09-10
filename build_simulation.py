@@ -31,8 +31,6 @@ def build_simulation(sim_time=1000, second_sine=False, noisy=True,
   
     neuron = nest.Create("iaf_psc_alpha")
     
-    
-    
     neuron.set(V_th = V_thresh)
     neuron.set(V_m = E_m)
     neuron.set(C_m = C)
@@ -41,85 +39,63 @@ def build_simulation(sim_time=1000, second_sine=False, noisy=True,
     neuron.set(I_e = 0)
     neuron.set(tau_m = tau_m)
     
-    
+
+    noise = nest.Create(
+        "noise_generator",
+        1,
+        params=[
+            {"mean": 0.0, "std": SD, "dt": 0.5},
+
+        ]
+    )
+
+    multimeter = nest.Create(
+        "multimeter",
+        params={
+            "interval": resolution,
+            "record_from": ["V_m"],
+            "start" : 1000,
+        }
+    )
+
     f2=f1+beat
-    
     sine = nest.Create(
         "ac_generator",
         2,
         params=[
-            {"amplitude": a, "frequency": f2},
             {"amplitude": a, "frequency": f1},
+            {"amplitude": a, "frequency": f2},
         ]
     )
-    
-    noise = nest.Create(
-        "noise_generator",
-        2,
-        params=[
-            {"mean": 0.0, "std" : SD, "dt" : 0.5},
-            {"mean" : 0.0, "std": SD, "dt" : 0.5}
-        ]
-    )
-    
-    
-    
-    multimeter = nest.Create(
-        "multimeter", 
-        params = {
-            "interval": resolution,
-            "record_from": ["V_m"]
-        }
-    )
-    
+
+
    
     spike_recorder = nest.Create("spike_recorder",
                                 params = {
                                 "start" : 1000})
     
     #Connections
-    
-    if second_sine == False:
-        
-        nest.Connect(multimeter, neuron)
-        
-        nest.Connect(sine[1], neuron)
-    
-        nest.Connect(neuron, spike_recorder)
-        
-        nest.rng_seed = seed
-        
-        if noisy == True:
-            nest.Connect(
-            noise[1],
-            neuron)
-    
-    # Adding second sine current
-    
-    else:
-        
-        nest.Connect(multimeter, neuron)
-        
-        nest.Connect(neuron, spike_recorder)
-        
-        #nest.Connect(voltmeter, neuron)
-        
-        nest.rng_seed = seed
-        
+    nest.Connect(multimeter, neuron)
+    nest.Connect(neuron, spike_recorder)
+
+    nest.rng_seed = seed
+
+    if second_sine:
         nest.Connect(sine[0], neuron)
-        
         nest.Connect(sine[1], neuron)
-        
-        if noisy == True:
-            
-            nest.Connect(
-                noise[0],
-                neuron
-            )
+    else:
+        nest.Connect(sine[0], neuron)
+
+    if noisy:
+
+        nest.Connect(
+            noise[0],
+            neuron
+        )
         
     # Simulating and recording results 
     nest.set_verbosity("M_WARNING")
-    nest.Simulate(sim_time)
+    nest.Simulate(sim_time + 1000)
     
     mm_data = multimeter.get("events")
     events = spike_recorder.get("events")
@@ -135,7 +111,7 @@ def build_simulation(sim_time=1000, second_sine=False, noisy=True,
         "V_th": V_thresh,
         "sim_time" : sim_time,
         "times" : times,
-        "Spike_rate" : len(ts)/sim_time*1000
+        "firing_rate" : len(ts)/sim_time*1000
     }
     
     return results

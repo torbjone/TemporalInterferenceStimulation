@@ -104,10 +104,9 @@ def find_spike_rate(spike_times, bin_size, sim_time, demean):
 
     return spike_rate, spike_counts
 
+
 def psd(spike_times, bin_size, sim_time, f, demean=False, normalize=False):
     spike_rate, _ = find_spike_rate(spike_times, bin_size, sim_time, demean=demean)
-
-
     
     dt = bin_size / 1000
     fs = 1 / dt
