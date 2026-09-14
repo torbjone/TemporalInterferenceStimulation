@@ -21,7 +21,7 @@ import neuron
 
 np.random.seed(1234)
 
-load_headmodel = True
+load_headmodel = False
 
 if load_headmodel:
     _nyhead_candidates = ["sa_nyhead.mat",
@@ -375,7 +375,8 @@ def run_RT_based_simulation(cell_name, dt, tstop, cutoff, input_idx,
 
     scale_factor = 1e0
     cell = return_cell_model(cell_name=cell_name, dt=dt, tstop=tstop,
-                             cutoff=cutoff, make_passive=True, rotation=[-np.pi/2, -np.pi/9, 0])
+                             cutoff=cutoff, make_passive=True,
+                             rotation=[-np.pi/2, -np.pi/9, 0])
 
     noise_vec = neuron.h.Vector(tES_current * scale_factor)
 
@@ -404,9 +405,9 @@ def run_RT_based_simulation(cell_name, dt, tstop, cutoff, input_idx,
     cell.tvec -= cell.tvec[0]
 
     p = CurrentDipoleMoment(cell).get_transformation_matrix() @ cell.imem
-    p = p[2, :]
+    #p = p[2, :]
 
-    eeg = lead_field * p * 1E-9
+    eeg = lead_field * p[2, :] * 1E-9
 
     print("p: ", p)
     print("EEG: ", eeg)
@@ -437,18 +438,27 @@ def run_RT_based_simulation(cell_name, dt, tstop, cutoff, input_idx,
     ax3 = fig.add_subplot(338, xlabel="time (ms)", ylabel="EEG µV")
 
     ax1_psd = fig.add_subplot(333, xlabel="frequency (Hz)", ylabel="input (nA)", ylim=[1e-1, 1e1])
-    ax2_psd = fig.add_subplot(336,  xlabel="frequency (Hz)", ylabel="$p_z$ (nAµm)")
+    ax2_psd = fig.add_subplot(336, xlabel="frequency (Hz)", ylabel="$p_z$ (nAµm)")
     ax3_psd = fig.add_subplot(339, xlabel="frequency (Hz)", ylabel="EEG (µV)")
 
     ax_neur.plot(cell.x.T, cell.z.T, c='k', lw=0.5, zorder=1)
 
-    ax1.plot(cell.tvec, noise_vec)
-    ax2.plot(cell.tvec, p[:])
+    ax1.plot(cell.tvec, noise_vec, c='k')
+    ax2.plot(cell.tvec, p[2, :], label="$P_z$")
+    ax2.plot(cell.tvec, p[1, :], label="$P_y$")
+    ax2.plot(cell.tvec, p[0, :], label="$P_x$")
+
     ax3.plot(cell.tvec, eeg * 1e3, c='k')
 
-    ax1_psd.loglog(freqs, yf1[0])
-    ax2_psd.loglog(freqs, yf2[0])
-    ax3_psd.loglog(freqs, yf3[0] * 1e3)
+    ax1_psd.loglog(freqs, yf1[0], c='k')
+    ax2_psd.loglog(freqs, yf2[0], label="$P_x$")
+    ax2_psd.loglog(freqs, yf2[1], label="$P_y$")
+    ax2_psd.loglog(freqs, yf2[2], label="$P_z$")
+    ax3_psd.loglog(freqs, yf3[0] * 1e3, c='k')
+
+    ax2_psd.legend(frameon=False, ncol=1, loc="upper right")
+    # ax2.legend(frameon=False, ncol=1, loc="upper right")
+
     simplify_axes(fig.axes)
     fig.savefig(f"control_RT_sim_{cell_name}.png")
     fig.savefig(f"control_RT_sim_{cell_name}.pdf")

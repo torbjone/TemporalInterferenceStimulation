@@ -64,6 +64,7 @@ def run_network_simulation(pop_size=100,
                            tau_m=10,
                            n_record_A=5,
                            pop_rate_bin_size=1.0,
+                           n_threads=1,
                            seed=2,
                            resolution=0.1,
                            sim_name="network_test",
@@ -105,6 +106,11 @@ def run_network_simulation(pop_size=100,
     pop_rate_bin_size : float
         Bin width (ms) used to compute the full population-A firing rate (the
         summed spike rate of all N neurons) that drives neuron B.
+    n_threads : int
+        Number of local (shared-memory) threads NEST uses to parallelise the
+        simulation across CPU cores. Because the per-thread RNG streams change
+        with the thread count, the spike realisation depends on `n_threads`;
+        it is therefore part of the cached parameter set.
     seed : int
         Master seed for the NEST kernel and for the delay draw.
     resolution : float
@@ -132,6 +138,7 @@ def run_network_simulation(pop_size=100,
         "tau_m": tau_m,
         "n_record_A": n_record_A,
         "pop_rate_bin_size": pop_rate_bin_size,
+        "n_threads": n_threads,
         "seed": seed,
         "resolution": resolution,
         "sim_name": sim_name,
@@ -163,8 +170,12 @@ def run_network_simulation(pop_size=100,
     import nest
 
     nest.ResetKernel()
-    nest.verbosity = nest.VerbosityLevel.WARNING
-    nest.SetKernelStatus({"resolution": resolution})
+    nest.verbosity = nest.VerbosityLevel.INFO
+    nest.SetKernelStatus({"print_time": True})
+    # local_num_threads must be set before any nodes are created. Threading
+    # (shared memory) parallelises the run across `n_threads` CPU cores within
+    # this single process, so all recordings remain locally retrievable.
+    nest.SetKernelStatus({"resolution": resolution, "local_num_threads": n_threads})
     nest.rng_seed = seed
 
     cutoff = 1000  # ms of initial transient discarded from the recordings
@@ -463,13 +474,13 @@ def plot_network_results(results, sim_params, tlim=[5, 6], max_f=2000,
 
 if __name__ == "__main__":
     sim_params = dict(
-        pop_size=1000,
-        sim_time=10000e3,
+        pop_size=10000,
+        sim_time=1000e3,
         f_values=[1000, 1020],
-        target_stim_dVm=0.3,
+        target_stim_dVm=0.1,
         noise_level_Vm=4.0,
-        noise_level_Vm_B=0.0,
-        syn_weight=5.0,
+        noise_level_Vm_B=4.0,
+        syn_weight=0.15,
         syn_delay=2,
         syn_delay_std=0.0,
         tau_syn=2.0,
@@ -481,7 +492,8 @@ if __name__ == "__main__":
         pop_rate_bin_size=0.1,
         seed=2,
         resolution=0.1,
-        sim_name="network_test",
+        n_threads=8,
+        sim_name="network_test_weaker_0.1",
         force_rerun=False,
         save_Vm=True,
     )
