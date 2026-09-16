@@ -83,6 +83,20 @@ def simplify_axes(axes):
         ax.get_yaxis().tick_left()
 
 
+def mark_subplots(axes, letters='ABCDEFGHIJKLMNOPQRSTUVWXYZ', xpos=-0.12, ypos=1.15):
+
+    if not type(axes) is list:
+        axes = [axes]
+
+    for idx, ax in enumerate(axes):
+        ax.text(xpos, ypos, letters[idx].capitalize(),
+                horizontalalignment='center',
+                verticalalignment='center',
+                fontweight='demibold',
+                fontsize=10,
+                transform=ax.transAxes)
+
+
 def find_spike_rate(spike_times, bin_size, sim_time):
     # creating bins with width = bin_size (ms)
     t_bins = np.arange(0, sim_time + bin_size, bin_size)
@@ -160,7 +174,7 @@ def run_single_cell_simulation(sim_time=10e3,
                                V_th=-50.0, E_m=-60.0, tau_m=10,
                                seed=2, resolution=0.1, sim_name="test",
                                save_dir="results", force_rerun=False,
-                               save_Vm=True):
+                               save_Vm=True, description=""):
     """This function creates:
     -Single iaf_psc_alpha neuron (LIF w/alpha-shaped postsynaptic currents)
     -noise using a noise_generator to get noise from Gaussian distribution
@@ -416,6 +430,267 @@ def plot_single_cell_results(results, sim_params,
 
 
 
+def _stim_freq_from_f_values(f_values):
+    """Frequency at which the SNR is evaluated: the difference (beat) frequency
+    for a two-carrier drive, or the single carrier otherwise."""
+    if len(f_values) == 2:
+        return np.abs(f_values[1] - f_values[0])
+    elif len(f_values) == 1:
+        return f_values[0]
+    raise ValueError("f_values must be a list of length 1 or 2")
+
+
+# Visual style borrowed from 'psd-single-neuron (3).ipynb'.
+_NB_TEAL = "#006D5B"    # main traces / axis labels
+_NB_FACE = 'w'#"#F5F5F5"    # panel background
+_NB_SPINE = "#333333"   # spines / ticks / scale bars
+_NB_GRID = "#B0B0B0"    # grid lines
+_NB_CARRIER = "#2563EB"  # carrier-frequency markers (blue)
+
+
+def _apply_nb_style(ax):
+    """Apply the notebook's panel styling (background, spines, grid, colours)."""
+    ax.set_facecolor(_NB_FACE)
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    ax.spines["left"].set_color(_NB_SPINE)
+    ax.spines["bottom"].set_color(_NB_SPINE)
+    ax.tick_params(axis="both", colors=_NB_SPINE)
+    ax.xaxis.label.set_color(_NB_TEAL)
+    ax.yaxis.label.set_color(_NB_TEAL)
+    ax.grid(color=_NB_GRID, linestyle="-", linewidth=0.5)
+
+
+def plot_combined_single_cell_examples(fig_1_list, max_f=1800, tlim=[5, 5.2],
+                                       firing_rate_bin_size=0.1,
+                                       vm_ylim=(-72, -44),
+                                       time_scale_ms=50.0, amp_scale_mV=10.0,
+                                       carrier_zoom_margin=15.0,
+                                       colors=None,
+                                       psd_segments=None,
+                                       save_name="combined_single_cell_examples.png"):
+    """Plot several single-cell simulations overlaid in one figure, in the
+    visual style of 'psd-single-neuron (3).ipynb' (light-grey background,
+    DejaVu Serif, subtle grid), using one colour per entry throughout.
+
+    `fig_1_list` is a list of `sim_params` dicts (each a valid keyword-argument
+    set for run_single_cell_simulation, e.g. the fig_1_list built in __main__).
+    Because the membrane potentials are almost identical across entries, all of
+    them share a single, full-width top panel; their spectra are shown in the
+    two columns below it:
+
+        top (spanning both columns) : every entry's membrane potential, one
+            colour per entry, with per-entry spike markers in a small raster
+            band above the traces. The axes are removed; time and amplitude are
+            indicated by scale bars (`time_scale_ms`, `amp_scale_mV`) instead.
+        bottom-left  : PSD of the membrane potential, one colour per entry,
+        bottom-right : PSD of the firing rate, one colour per entry.
+
+    Panel/line titles are NOT drawn on the figure; the text (firing rate,
+    STD(Vm), SNRs) is printed to stdout when the figure is made. A legend keyed
+    by `sim_name` identifies the colours.
+
+    A single zoom inset is added to the bottom-right panel (firing-rate PSD),
+    spanning the two carrier frequencies (with `carrier_zoom_margin` Hz padding)
+    to show that both carriers are present, deliberately excluding the beat
+    frequency. It is drawn only if some entry has two carriers.
+
+    `colors` optionally overrides the per-entry colours (a list at least
+    `len(fig_1_list)` long); otherwise the tab10 palette is used. Runs are
+    obtained through run_single_cell_simulation, so cached results are reused;
+    each entry must have been run with save_Vm=True (the default) for the Vm
+    panels to be available."""
+
+    n = len(fig_1_list)
+    if colors is None:
+        cmap = plt.get_cmap("tab10")
+        colors = [cmap(i % 10) for i in range(n)]
+
+    plt.close("all")
+    plt.rcParams["font.family"] = "DejaVu Serif"
+    fig = plt.figure(figsize=(13, 13), facecolor="white")
+    gs = fig.add_gridspec(len(fig_1_list) + 1, 2, height_ratios=[1.0] + [1.3] * n, hspace=0.28,
+                          wspace=0.28, left=0.07, right=0.97,
+                          top=0.96, bottom=0.09)
+
+    ax_vm = fig.add_subplot(gs[0, :])
+
+    # Spike raster band across the top of the Vm panel: one thin sub-row per
+    # entry, coloured to match, so overlaid spike trains stay legible.
+    band_hi = vm_ylim[1] - 0.02 * (vm_ylim[1] - vm_ylim[0])
+    band_lo = band_hi - 0.18 * (vm_ylim[1] - vm_ylim[0])
+    slot = (band_hi - band_lo) / max(n, 1)
+
+    fr_for_inset = []   # (freqs, psd, color) collected for the carrier zoom
+    carriers = None
+    handles, labels = [], []
+
+    for row, sim_params in enumerate(fig_1_list):
+        ax_vm_psd = fig.add_subplot(gs[row + 1, 0], xlim=[1, max_f], xlabel="frequency [Hz]",
+                                    ylabel=r"PSD [$\mathrm{mV}^2/\mathrm{Hz}$]", ylim=[1e-5, 5e1])
+        ax_fr_psd = fig.add_subplot(gs[row + 1, 1], xlim=[1, max_f], xlabel="frequency [Hz]",
+                                    ylabel=r"PSD [$\mathrm{spikes}^2/\mathrm{Hz}$]", ylim=[1e-2, 1e3])
+
+        results = run_single_cell_simulation(**sim_params)
+
+        sim_time = sim_params["sim_time"]
+        sim_name = sim_params.get("description", f"entry {row}")
+        f_values = sim_params["f_values"]
+        stim_freq = _stim_freq_from_f_values(f_values)
+        color = colors[row]
+
+        have_vm = "Vm" in results
+        if not have_vm:
+            print(f"'{sim_name}' has no saved Vm (save_Vm=False) - skipping its "
+                  f"Vm trace/PSD.")
+
+        # --- Spectra ----------------------------------------------------------
+        spike_rate, t_bins = find_spike_rate(
+            results["spike_times"], firing_rate_bin_size, sim_time)
+        if psd_segments is None:
+            freqs_fr, fr_psd = return_freq_and_psd(t_bins, spike_rate)
+            fr_psd = fr_psd[0]
+        else:
+            freqs_fr, fr_psd = welch(spike_rate, fs=1000 / sim_params["resolution"], nperseg=len(spike_rate) // psd_segments,
+                                      noverlap=(len(spike_rate) // psd_segments) // 2)
+
+        fr_SNR = compute_SNR(freqs_fr, fr_psd, stim_freq)
+
+        if have_vm:
+            #
+            fs = 1000 / sim_params["resolution"]
+            if psd_segments is None:
+                freqs_vm, vm_psd = return_freq_and_psd(results["times"], results["Vm"])
+                vm_psd = vm_psd[0]
+            else:
+                freqs_vm, vm_psd = welch(results["Vm"], fs=fs, nperseg=len(results["Vm"]) // psd_segments,
+                                          noverlap=(len(results["Vm"]) // psd_segments) // 2)
+
+            vm_SNR = compute_SNR(freqs_vm, vm_psd, stim_freq)
+
+        # --- Titles: printed to stdout, NOT drawn on the figure ---------------
+        vm_title = f"{sim_name} - Vm: firing rate {results['firing_rate']:.2f} Hz"
+        if have_vm:
+            vm_title += f", STD(Vm) {np.std(results['Vm']):.2f} mV"
+        print(vm_title)
+        if have_vm:
+            print(f"{sim_name} - PSD of Vm: SNR at {stim_freq:.0f} Hz = "
+                  f"{vm_SNR:.2f}")
+        print(f"{sim_name} - PSD of firing rate: SNR at {stim_freq:.0f} Hz = "
+              f"{fr_SNR:.2f}")
+
+        # --- Top panel: overlaid Vm traces + per-entry spike raster ----------
+        if have_vm:
+            tlim_mask = (results["times"] / 1000 >= tlim[0]) & (results["times"] / 1000 <= tlim[1])
+
+            line, = ax_vm.plot(results["times"][tlim_mask] / 1000, results["Vm"][tlim_mask],
+                               color=color, lw=2 - row*0.3, label=sim_name)
+            handles.append(line)
+            labels.append(sim_name)
+        y_lo = band_lo + row * slot
+        ax_vm.vlines(results["spike_times"] / 1000, y_lo, y_lo + 0.8 * slot,
+                     color=color, lw=2)
+
+        # --- Bottom-left: Vm PSD ---------------------------------------------
+        if have_vm:
+            mask = freqs_vm < max_f
+            ax_vm_psd.loglog(freqs_vm[mask], vm_psd[mask], color=color,
+                             label=sim_name)
+
+        # --- Bottom-right: firing-rate PSD -----------------------------------
+        mask = freqs_fr < max_f
+        ax_fr_psd.loglog(freqs_fr[mask], fr_psd[mask], color=color,
+                         label=sim_name)
+
+        # Remember the two carriers (from any two-carrier entry) for the inset.
+        if len(f_values) == 2:
+            carriers = sorted(float(f) for f in f_values)
+        fr_for_inset.append((freqs_fr, fr_psd, color))
+
+        # --- Spectral-panel styling ----------------------------------------------
+        for ax in (ax_vm_psd, ax_fr_psd):
+            _apply_nb_style(ax)
+
+    # --- Top-panel styling: no axes, scale bars, legend ----------------------
+    ax_vm.set_xlim(tlim)
+    ax_vm.set_ylim(vm_ylim)
+    ax_vm.axis("off")
+
+    x_span = tlim[1] - tlim[0]
+    y_span = vm_ylim[1] - vm_ylim[0]
+    x0 = tlim[0] + 0.02 * x_span
+    y0 = vm_ylim[0] + 0.10 * y_span - 2
+    t_len = time_scale_ms / 1000.0  # ms -> s (x-axis is in seconds)
+    ax_vm.plot([x0, x0 + t_len], [y0, y0], color=_NB_TEAL, lw=2.5,
+               solid_capstyle="butt")
+    ax_vm.text(x0 + t_len / 2, y0 - 0.03 * y_span, f"{time_scale_ms:.0f} ms",
+               ha="center", va="top", color=_NB_TEAL, fontsize=11)
+    ax_vm.plot([x0, x0], [y0, y0 + amp_scale_mV], color=_NB_TEAL, lw=2.5,
+               solid_capstyle="butt")
+    ax_vm.text(x0 - 0.015 * x_span, y0 + amp_scale_mV / 2,
+               f"{amp_scale_mV:.0f} mV", ha="right", va="center",
+               rotation=90, color=_NB_TEAL, fontsize=11)
+
+    ax_vm.text(tlim[0] + 2, -57,
+               r"$V_{\rm m}$", ha="center", va="top")
+
+    if handles:
+        ax_vm.legend(handles, labels, loc=(0.3, 1.1),
+                     frameon=False, fontsize=10, ncol=min(len(handles), 4))
+
+        # ax.legend(framealpha=1, edgecolor=_NB_SPINE, fontsize=9)
+
+    # --- Carrier zoom inset on the firing-rate PSD panel ---------------------
+    use_inset = False
+    if (carriers is not None) and use_inset:
+        lo = carriers[0] - carrier_zoom_margin
+        hi = carriers[-1] + carrier_zoom_margin
+        axin = ax_fr_psd.inset_axes([0.52, 0.55, 0.45, 0.42])
+        for freqs_fr, fr_psd, color in fr_for_inset:
+            m = (freqs_fr >= lo) & (freqs_fr <= hi)
+            axin.semilogy(freqs_fr[m], fr_psd[m], color=color)
+        for c in carriers:
+            axin.axvline(c, ls="--", dashes=(2, 4), lw=0.9, color=_NB_CARRIER)
+        axin.set_xlim(lo, hi)
+        axin.tick_params(labelsize=7)
+        _apply_nb_style(axin)
+        print(f"    (carrier zoom inset on firing-rate PSD: carriers "
+              f"{carriers[0]:.0f} & {carriers[-1]:.0f} Hz)")
+
+    mark_subplots(fig.axes, xpos=-0.05, ypos=1.05)
+
+    fig.savefig(save_name, dpi=150)
+    print(f"Saved figure to '{save_name}'")
+    return fig
+
+
+def plot_compare_Vms(sim_list):
+
+    tlim = [5225, 5320]
+    fig = plt.figure(figsize=[12, 4])
+    ax1 = fig.add_axes([0.07, 0.2, 0.9, 0.5], xlim=tlim, ylim=[-75, -50],
+                          xlabel="time (ms)", ylabel=r"$V_{\rm m}$ (mV)")
+
+    clrs = ["C0", "C1", "C2", "C4"]
+
+    for row, sim_params in enumerate(sim_list):
+        results = run_single_cell_simulation(**sim_params)
+
+        t_mask = (results["times"] > tlim[0]) & (results["times"] < tlim[1])
+        ax1.plot(results["times"][t_mask], results["Vm"][t_mask],
+                 label=sim_params["description"], c=clrs[row], linewidth=2.5 - row/2)
+
+        spikes_mask = (results["spike_times"] > tlim[0]) & (results["spike_times"] < tlim[1])
+        for t in results["spike_times"][spikes_mask]:
+
+            ax1.plot([t, t], [-48 + row * 3, -46 + row * 3],
+                        linestyle="-", linewidth=2., c=clrs[row], clip_on=False)
+
+    ax1.legend(frameon=False, ncol=4, loc=(0.25,-.4))
+    simplify_axes(ax1)
+    fig.savefig("vm_compare.pdf")
+
+
 if __name__ == "__main__":
     sim_params_1ABC = dict(
         sim_time=10000e3,
@@ -427,6 +702,7 @@ if __name__ == "__main__":
         resolution=0.1,
         sim_name="Fig1A-C",
         force_rerun=False,
+        description="only noise",
     )
 
     sim_params_S1 = dict(
@@ -439,6 +715,7 @@ if __name__ == "__main__":
         resolution=0.1,
         sim_name="FigS1",
         force_rerun=False,
+        description="only stimulation",
     )
     sim_params_1DEF = dict(
         sim_time=10000e3,
@@ -450,6 +727,7 @@ if __name__ == "__main__":
         resolution=0.1,
         sim_name="Fig1D-F",
         force_rerun=False,
+        description="20 Hz stimulation",
     )
     sim_params_S2 = dict(
         sim_time=10e3,
@@ -473,6 +751,7 @@ if __name__ == "__main__":
         resolution=0.1,
         sim_name="Fig1G-I",
         force_rerun=False,
+        description="1000 Hz stimulation",
     )
 
     sim_params_S3 = dict(
@@ -487,7 +766,7 @@ if __name__ == "__main__":
         force_rerun=False,
     )
 
-    sim_params_JKL = dict(
+    sim_params_1JKL = dict(
         sim_time=10000e3,
         target_stim_dVm=0.3,
         f_values=[1000, 1020],
@@ -497,12 +776,20 @@ if __name__ == "__main__":
         resolution=0.1,
         sim_name="Fig1J-L",
         force_rerun=False,
+        description="TI stimulation",
     )
 
 
 
-    sim_params_list = [sim_params_JKL]
+    sim_params_list = [sim_params_1JKL]
+    fig_1_list = [sim_params_1ABC, sim_params_1DEF, sim_params_1GHI, sim_params_1JKL]
 
-    for sim_params in sim_params_list:
-        results = run_single_cell_simulation(**sim_params)
-        plot_single_cell_results(results, sim_params)
+    # for sim_params in sim_params_list:
+    #     results = run_single_cell_simulation(**sim_params)
+    #     plot_single_cell_results(results, sim_params)
+
+    for psd_segments in [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 16, 20]:
+        print("PSD segments: ", psd_segments, "")
+        plot_combined_single_cell_examples(fig_1_list, psd_segments=psd_segments, save_name=f"Fig1_combined_{psd_segments}psd_segments.png")
+
+    # plot_compare_Vms(fig_1_list)

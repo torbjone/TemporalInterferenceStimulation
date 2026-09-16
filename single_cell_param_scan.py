@@ -144,11 +144,12 @@ if __name__ == "__main__":
     # Two carriers 20 Hz apart -> the firing-rate envelope beats at 20 Hz,
     # which is the frequency at which power/SNR are evaluated.
     analysis_freq = 20.0
+    carrier_freq = 1000.0
 
     # Parameters held constant across the scan.
     const_params = dict(
         sim_time=10000e3,
-        f_values=[1000, 1020],
+        f_values=[carrier_freq, carrier_freq + analysis_freq],
         seed=2,
         V_th=-50.,
         E_m=-60.,
