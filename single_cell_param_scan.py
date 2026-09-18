@@ -16,6 +16,7 @@ import os
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.colors import LogNorm
+from scipy.signal import welch
 
 from single_cell_simulations import (
     run_single_cell_simulation,
@@ -23,17 +24,25 @@ from single_cell_simulations import (
     return_freq_and_psd,
     compute_SNR,
     simplify_axes,
-    plot_single_cell_results,
+    plot_single_cell_results, mark_subplots,
 )
 
-def analyze_firing_rate(results, sim_time, analysis_freq, bin_size=0.1):
+def analyze_firing_rate(results, sim_time, analysis_freq, bin_size=0.1,
+                        use_welch=False, welch_segments=8,):
     """From a simulation `results` dict, return the firing-rate power and SNR
     at `analysis_freq` (Hz), computed the same way as plot_single_cell_results:
     bin the spikes into a rate, take its PSD, and read off the value / SNR at
     the frequency bin nearest `analysis_freq`."""
     spike_rate, t_bins = find_spike_rate(results["spike_times"], bin_size, sim_time)
-    freqs, psd = return_freq_and_psd(t_bins, spike_rate)
-    psd = psd[0]
+
+    if use_welch:
+        # Sampling rate (measurements per sec)
+        fs_fr = 1000 / bin_size
+        freqs, psd = welch(spike_rate, fs=fs_fr, nperseg=len(spike_rate) // welch_segments,
+                                  noverlap=(len(spike_rate) // welch_segments) // 2)
+    else:
+        freqs, psd = return_freq_and_psd(t_bins, spike_rate)
+        psd = psd[0]
 
     arg_f = np.argmin(np.abs(freqs - analysis_freq))
     power = psd[arg_f]
@@ -43,7 +52,7 @@ def analyze_firing_rate(results, sim_time, analysis_freq, bin_size=0.1):
 
 def run_param_scan(target_stim_dVms, noise_level_Vms, const_params,
                    analysis_freq=20.0, firing_rate_bin_size=0.1,
-                   save_dir="results/param_scan"):
+                   save_dir="results/param_scan", use_welch=False, welch_segments=8,):
     """Run the 2D scan and return (firing_rate, fr_power, fr_SNR) matrices.
 
     Each matrix has shape (len(noise_level_Vms), len(target_stim_dVms)) so that
@@ -74,7 +83,7 @@ def run_param_scan(target_stim_dVms, noise_level_Vms, const_params,
             # plot_single_cell_results(results, sim_params)
             power, snr = analyze_firing_rate(
                 results, const_params["sim_time"], analysis_freq,
-                bin_size=firing_rate_bin_size)
+                bin_size=firing_rate_bin_size,  use_welch=use_welch, welch_segments=welch_segments)
 
             firing_rate[i, j] = results["firing_rate"]
             fr_power[i, j] = power
@@ -98,7 +107,9 @@ def plot_param_scan(firing_rate, fr_power, fr_SNR,
     defaults to a log-spaced set if not given. The firing-rate and power panels
     use `n_levels` automatically-placed levels."""
     if snr_levels is None:
-        snr_levels = [0.5, 1, 2, 5, 10, 20, 50, 100, 200, 500]
+        snr_levels = [2, 5, 10, 20, 50, 100, 200]
+
+    fr_levels = [25, 50, 100, 200, 400, 800, 1600, 3200]
     snr_levels = np.asarray(snr_levels, dtype=float)
 
     # Grid of data coordinates: x = noise level, y = target stim dVm. Each
@@ -108,33 +119,45 @@ def plot_param_scan(firing_rate, fr_power, fr_SNR,
     # (matrix, title, levels, log_scale) - the SNR panel uses manual levels on
     # a logarithmic colour scale; the others use automatic linear levels.
     panels = [
-        (firing_rate, "Firing rate (Hz)", n_levels, False),
-        (fr_power, f"Firing-rate power at {analysis_freq:.0f} Hz", n_levels, False),
-        (fr_SNR, f"Firing-rate SNR at {analysis_freq:.0f} Hz", snr_levels, True),
+        (firing_rate, "Firing rate (Hz)", n_levels, False, "Hz"),
+        (fr_power, f"Firing-rate power at {analysis_freq:.0f} Hz", fr_levels, True, "|firing rate|²/Hz"),
+        (fr_SNR, f"Firing-rate SNR at {analysis_freq:.0f} Hz", snr_levels, True, ''),
     ]
 
     fig, axes = plt.subplots(1, 3, figsize=(16, 4.8))
     fig.subplots_adjust(wspace=0.35, left=0.06, right=0.97, bottom=0.15, top=0.9)
 
-    for ax, (matrix, title, levels, log_scale) in zip(axes, panels):
+    for ax, (matrix, title, levels, log_scale, label) in zip(axes, panels):
         Z = matrix.T
         if log_scale:
             # Match the colour normalisation to the manual level range; extend
             # both ends so out-of-range cells still get the end colours.
             norm = LogNorm(vmin=levels[0], vmax=levels[-1])
-            cf = ax.contourf(X, Y, Z, levels=levels, norm=norm, cmap="hot",
-                             extend="both")
+            cf = ax.contourf(X, Y, Z, levels=levels, norm=norm, cmap="Greens_r",extend="both")
             # Overlay labelled contour lines for readability.
             cl = ax.contour(X, Y, Z, levels=levels, colors="k", linewidths=0.4)
-            ax.clabel(cl, fmt="%g", fontsize=7)
+            ax.clabel(cl, fmt="%g", fontsize=10)
         else:
-            cf = ax.contourf(X, Y, Z, levels=levels, cmap="hot")
+            cf = ax.contourf(X, Y, Z, levels=levels, cmap="Greens_r")
+
+            cl = ax.contour(X, Y, Z, levels=levels, colors="k", linewidths=0.4)
+            ax.clabel(cl, fmt="%g", fontsize=10)
+
         ax.set_title(title)
         ax.set_xlabel("noise level Vm (mV)")
         ax.set_ylabel("target stim dVm (mV)")
-        fig.colorbar(cf, ax=ax, fraction=0.046, pad=0.04)
+        if log_scale:
+           cbar = fig.colorbar(cf, ax=ax, fraction=0.046, pad=0.04)
+           cbar.set_ticks(levels)
+           cbar.set_ticklabels([f"{int(l)}" for l in levels])
+
+        else:
+           cbar = fig.colorbar(cf, ax=ax, fraction=0.046, pad=0.04, label="")
+        cbar.set_label(label)
+        ax.plot(4, 0.3, '*', c='orange', ms=8)
 
     simplify_axes(list(axes))
+    mark_subplots(list(axes), ypos=1.05)
     fig.savefig(save_name, dpi=150)
     print(f"\nSaved figure to '{save_name}'")
     return fig
@@ -159,20 +182,22 @@ if __name__ == "__main__":
         force_rerun=False,
     )
 
-    # Scanned axes.
+    # Scanned axes:
     target_stim_dVms = np.linspace(0, 1, 17)   # mV
     noise_level_Vms = np.linspace(3, 9, 16)    # mV
 
     rerun_scan = False
+    welch_segments = 8
+    use_welch = True
 
     if rerun_scan:
         firing_rate, fr_power, fr_SNR = run_param_scan(
             target_stim_dVms, noise_level_Vms, const_params,
-            analysis_freq=analysis_freq)
+            analysis_freq=analysis_freq, use_welch=use_welch, welch_segments=welch_segments,)
 
         # Store the matrices (with their axes) for later reuse.
         os.makedirs("results/param_scan", exist_ok=True)
-        np.savez("results/param_scan/param_scan_matrices.npz",
+        np.savez(f"results/param_scan/param_scan_matrices_welch:{use_welch}:{welch_segments}.npz",
                  target_stim_dVms=target_stim_dVms,
                  noise_level_Vms=noise_level_Vms,
                  firing_rate=firing_rate,
@@ -181,7 +206,7 @@ if __name__ == "__main__":
                  analysis_freq=analysis_freq)
     else:
         # Load the matrices (and their axes) from the previously saved scan.
-        matrix_path = "results/param_scan/param_scan_matrices.npz"
+        matrix_path = f"results/param_scan/param_scan_matrices_welch:{use_welch}:{welch_segments}.npz"
         with np.load(matrix_path) as data:
             target_stim_dVms = data["target_stim_dVms"]
             noise_level_Vms = data["noise_level_Vms"]
@@ -194,4 +219,4 @@ if __name__ == "__main__":
     plot_param_scan(firing_rate, fr_power, fr_SNR,
                     target_stim_dVms, noise_level_Vms,
                     analysis_freq=analysis_freq,
-                    save_name="param_scan_log.png")
+                    save_name=f"param_scan_welch:{use_welch}:{welch_segments}.pdf")

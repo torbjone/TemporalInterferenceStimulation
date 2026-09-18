@@ -92,7 +92,7 @@ def mark_subplots(axes, letters='ABCDEFGHIJKLMNOPQRSTUVWXYZ', xpos=-0.12, ypos=1
         ax.text(xpos, ypos, letters[idx].capitalize(),
                 horizontalalignment='center',
                 verticalalignment='center',
-                fontweight='demibold',
+                fontweight='bold',
                 fontsize=10,
                 transform=ax.transAxes)
 
@@ -117,7 +117,7 @@ def find_spike_rate(spike_times, bin_size, sim_time):
     return spike_rate, t_bins
 
 
-def psd_welch(spike_times, sim_time, bin_size=0.25, segments=16,):
+def psd_welch(spike_times, sim_time, bin_size=0.1, segments=8,):
     """Computes the PSD of spiketrain given:
     spike_times : spike train,
     sim_time : duration of simulation
@@ -386,7 +386,8 @@ def plot_single_cell_results(results, sim_params,
     plt.close("all")
     fig = plt.figure(figsize=(10, 9))
     fig.subplots_adjust(wspace=0.5, right=0.98, top=0.95, hspace=0.6)
-    ax_vm = fig.add_subplot(311, ylim=[-75, -44], xlabel="time (s)", ylabel=r"$V_{\rm m}$ (mV)",
+    ax_vm = fig.add_subplot(311, ylim=[-61.0, -59.], #ylim=[-75, -44],
+                            xlabel="time (s)", ylabel=r"$V_{\rm m}$ (mV)",
                             title=r"Firing rate: {0:.2f} Hz; STD($V_m$): {1:.2f} mV".format(
                                 results["firing_rate"], np.std(results["Vm"])))
     ax_vm_psd = fig.add_subplot(323, title=f"SNR = {vm_SNR:.2f}", xlim=[1, max_f],
@@ -423,7 +424,7 @@ def plot_single_cell_results(results, sim_params,
 
     simplify_axes(fig.axes)
 
-    plt.savefig(f"{sim_name}_{welch_segments}_{int(sim_time / 1000)}s.png")
+    plt.savefig(f"{sim_name}_{welch_segments}_{int(sim_time / 1000)}s.pdf")
 
     return fig
 
@@ -458,14 +459,15 @@ def _apply_nb_style(ax):
     ax.tick_params(axis="both", colors=_NB_SPINE)
     ax.xaxis.label.set_color(_NB_TEAL)
     ax.yaxis.label.set_color(_NB_TEAL)
-    ax.grid(color=_NB_GRID, linestyle="-", linewidth=0.5)
+    #ax.grid(color=_NB_GRID, linestyle="-", linewidth=0.5)
+    ax.grid(False)
 
 
 def plot_combined_single_cell_examples(fig_1_list, max_f=1800, tlim=[5, 5.2],
                                        firing_rate_bin_size=0.1,
                                        vm_ylim=(-72, -44),
                                        time_scale_ms=50.0, amp_scale_mV=10.0,
-                                       carrier_zoom_margin=15.0,
+                                       carrier_zoom_margin=10.0,
                                        colors=None,
                                        psd_segments=None,
                                        save_name="combined_single_cell_examples.png"):
@@ -509,9 +511,9 @@ def plot_combined_single_cell_examples(fig_1_list, max_f=1800, tlim=[5, 5.2],
     plt.close("all")
     plt.rcParams["font.family"] = "DejaVu Serif"
     fig = plt.figure(figsize=(13, 13), facecolor="white")
-    gs = fig.add_gridspec(len(fig_1_list) + 1, 2, height_ratios=[1.0] + [1.3] * n, hspace=0.28,
-                          wspace=0.28, left=0.07, right=0.97,
-                          top=0.96, bottom=0.09)
+    gs = fig.add_gridspec(len(fig_1_list) + 2, 4, height_ratios=[1.0, 1.0] + [1.] * n, hspace=0.38,
+                          wspace=0.28, left=0.05, right=0.98,
+                          top=0.96, bottom=0.04)
 
     ax_vm = fig.add_subplot(gs[0, :])
 
@@ -526,10 +528,10 @@ def plot_combined_single_cell_examples(fig_1_list, max_f=1800, tlim=[5, 5.2],
     handles, labels = [], []
 
     for row, sim_params in enumerate(fig_1_list):
-        ax_vm_psd = fig.add_subplot(gs[row + 1, 0], xlim=[1, max_f], xlabel="frequency [Hz]",
+        ax_vm_psd = fig.add_subplot(gs[row + 1, :2], xlim=[1, max_f], xlabel="frequency [Hz]",
                                     ylabel=r"PSD [$\mathrm{mV}^2/\mathrm{Hz}$]", ylim=[1e-5, 5e1])
-        ax_fr_psd = fig.add_subplot(gs[row + 1, 1], xlim=[1, max_f], xlabel="frequency [Hz]",
-                                    ylabel=r"PSD [$\mathrm{spikes}^2/\mathrm{Hz}$]", ylim=[1e-2, 1e3])
+        ax_fr_psd = fig.add_subplot(gs[row + 1, 2:], xlim=[1, max_f], xlabel="frequency [Hz]",
+                                    ylabel=r"PSD [$\mathrm{spikes}^2/\mathrm{Hz}$]", ylim=[1e-0, 5e2])
 
         results = run_single_cell_simulation(**sim_params)
 
@@ -605,7 +607,7 @@ def plot_combined_single_cell_examples(fig_1_list, max_f=1800, tlim=[5, 5.2],
         # Remember the two carriers (from any two-carrier entry) for the inset.
         if len(f_values) == 2:
             carriers = sorted(float(f) for f in f_values)
-        fr_for_inset.append((freqs_fr, fr_psd, color))
+            fr_for_inset.append((freqs_fr, fr_psd, color))
 
         # --- Spectral-panel styling ----------------------------------------------
         for ax in (ax_vm_psd, ax_fr_psd):
@@ -635,25 +637,53 @@ def plot_combined_single_cell_examples(fig_1_list, max_f=1800, tlim=[5, 5.2],
                r"$V_{\rm m}$", ha="center", va="top")
 
     if handles:
-        ax_vm.legend(handles, labels, loc=(0.3, 1.1),
+        ax_vm.legend(handles, labels, loc=(0.3, -0.1),
                      frameon=False, fontsize=10, ncol=min(len(handles), 4))
 
         # ax.legend(framealpha=1, edgecolor=_NB_SPINE, fontsize=9)
 
     # --- Carrier zoom inset on the firing-rate PSD panel ---------------------
-    use_inset = False
+    use_inset = True
     if (carriers is not None) and use_inset:
-        lo = carriers[0] - carrier_zoom_margin
-        hi = carriers[-1] + carrier_zoom_margin
-        axin = ax_fr_psd.inset_axes([0.52, 0.55, 0.45, 0.42])
+        lo_carrier = carriers[0] - carrier_zoom_margin
+        hi_carrier = carriers[-1] + carrier_zoom_margin
+
+        lo_beat = stim_freq - 10
+        hi_beat = stim_freq + 10
+
+        ax_vm_zoom_1 = fig.add_subplot(gs[-1, 0], xlabel="frequency [Hz]",
+                                    ylabel=r"PSD [$\mathrm{mV}^2/\mathrm{Hz}$]", )
+        ax_vm_zoom_2 = fig.add_subplot(gs[-1, 1], xlabel="frequency [Hz]",
+                                    ylabel=r"PSD [$\mathrm{mV}^2/\mathrm{Hz}$]", )
+
+        ax_fr_zoom_1 = fig.add_subplot(gs[-1, 2], xlabel="frequency [Hz]",
+                                    ylabel=r"PSD [$\mathrm{spikes}^2/\mathrm{Hz}$]", )
+        ax_fr_zoom_2 = fig.add_subplot(gs[-1, 3], xlabel="frequency [Hz]",
+                                    ylabel=r"PSD [$\mathrm{spikes}^2/\mathrm{Hz}$]", )
+
         for freqs_fr, fr_psd, color in fr_for_inset:
-            m = (freqs_fr >= lo) & (freqs_fr <= hi)
-            axin.semilogy(freqs_fr[m], fr_psd[m], color=color)
-        for c in carriers:
-            axin.axvline(c, ls="--", dashes=(2, 4), lw=0.9, color=_NB_CARRIER)
-        axin.set_xlim(lo, hi)
-        axin.tick_params(labelsize=7)
-        _apply_nb_style(axin)
+            m_carrier_fr = (freqs_fr >= lo_carrier) & (freqs_fr <= hi_carrier)
+            m_beat_fr = (freqs_fr >= lo_beat) & (freqs_fr <= hi_beat)
+            m_carrier_vm = (freqs_vm >= lo_carrier) & (freqs_vm <= hi_carrier)
+            m_beat_vm = (freqs_vm >= lo_beat) & (freqs_vm <= hi_beat)
+
+            ax_vm_zoom_1.plot(freqs_vm[m_beat_vm], vm_psd[m_beat_vm], color=color)
+            ax_vm_zoom_1.set_xlim(lo_beat, hi_beat)
+            ax_fr_zoom_1.plot(freqs_fr[m_beat_fr], fr_psd[m_beat_fr], color=color)
+            ax_fr_zoom_1.set_xlim(lo_beat, hi_beat)
+
+            ax_vm_zoom_2.plot(freqs_vm[m_carrier_vm], vm_psd[m_carrier_vm], color=color)
+            ax_vm_zoom_2.set_xlim(lo_carrier, hi_carrier)
+            ax_fr_zoom_2.plot(freqs_fr[m_carrier_fr], fr_psd[m_carrier_fr], color=color)
+            ax_fr_zoom_2.set_xlim(lo_carrier, hi_carrier)
+
+        # for c in carriers:
+        #     axin.axvline(c, ls="--", dashes=(2, 4), lw=0.9, color=_NB_CARRIER)
+
+        # axin.tick_params(labelsize=7)
+        for ax in [ax_fr_zoom_1, ax_fr_zoom_2, ax_vm_zoom_1, ax_vm_zoom_2]:
+            _apply_nb_style(ax)
+
         print(f"    (carrier zoom inset on firing-rate PSD: carriers "
               f"{carriers[0]:.0f} & {carriers[-1]:.0f} Hz)")
 
@@ -717,6 +747,7 @@ if __name__ == "__main__":
         force_rerun=False,
         description="only stimulation",
     )
+
     sim_params_1DEF = dict(
         sim_time=10000e3,
         target_stim_dVm=0.3,
@@ -729,6 +760,7 @@ if __name__ == "__main__":
         force_rerun=False,
         description="20 Hz stimulation",
     )
+
     sim_params_S2 = dict(
         sim_time=10e3,
         target_stim_dVm=0.3,
@@ -762,7 +794,7 @@ if __name__ == "__main__":
         seed=2,
         V_th=-50.,
         resolution=0.1,
-        sim_name="FigS3",
+        sim_name="FigS3b",
         force_rerun=False,
     )
 
@@ -779,17 +811,16 @@ if __name__ == "__main__":
         description="TI stimulation",
     )
 
-
-
-    sim_params_list = [sim_params_1JKL]
+    sim_params_list = [sim_params_S1, sim_params_S2, sim_params_S3]
     fig_1_list = [sim_params_1ABC, sim_params_1DEF, sim_params_1GHI, sim_params_1JKL]
 
     # for sim_params in sim_params_list:
-    #     results = run_single_cell_simulation(**sim_params)
-    #     plot_single_cell_results(results, sim_params)
+    results = run_single_cell_simulation(**sim_params_S3)
+    plot_single_cell_results(results, sim_params_S3, tlim=[5, 6])
 
-    for psd_segments in [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 16, 20]:
-        print("PSD segments: ", psd_segments, "")
-        plot_combined_single_cell_examples(fig_1_list, psd_segments=psd_segments, save_name=f"Fig1_combined_{psd_segments}psd_segments.png")
+    # for psd_segments in [1, 2, 4, 6, 8, 10, 16]:
+    #     print("PSD segments: ", psd_segments, "")
+    #     plot_combined_single_cell_examples(fig_1_list, psd_segments=psd_segments, save_name=f"Fig1_combined_{psd_segments}psd_segments.png")
+    # plot_combined_single_cell_examples(fig_1_list, psd_segments=8, save_name=f"Fig1_combined_{8}psd_segments.pdf")
 
     # plot_compare_Vms(fig_1_list)
