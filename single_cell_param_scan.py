@@ -23,12 +23,13 @@ from single_cell_simulations import (
     find_spike_rate,
     return_freq_and_psd,
     compute_SNR,
+    calculate_spectral_snr_and_zscore,
     simplify_axes,
     plot_single_cell_results, mark_subplots,
 )
 
-def analyze_firing_rate(results, sim_time, analysis_freq, bin_size=0.1,
-                        use_welch=False, welch_segments=8,):
+def analyze_firing_rate(results, sim_time, analysis_freq, bin_size,
+                        use_welch=False, welch_segments=10,):
     """From a simulation `results` dict, return the firing-rate power and SNR
     at `analysis_freq` (Hz), computed the same way as plot_single_cell_results:
     bin the spikes into a rate, take its PSD, and read off the value / SNR at
@@ -47,11 +48,13 @@ def analyze_firing_rate(results, sim_time, analysis_freq, bin_size=0.1,
     arg_f = np.argmin(np.abs(freqs - analysis_freq))
     power = psd[arg_f]
     snr = compute_SNR(freqs, psd, analysis_freq)
-    return power, snr
+    snr2 = calculate_spectral_snr_and_zscore(freqs, psd, analysis_freq, freq_window=5)
+
+    return power, snr, snr2
 
 
 def run_param_scan(target_stim_dVms, noise_level_Vms, const_params,
-                   analysis_freq=20.0, firing_rate_bin_size=0.1,
+                   analysis_freq=20.0, firing_rate_bin_size=None,
                    save_dir="results/param_scan", use_welch=False, welch_segments=8,):
     """Run the 2D scan and return (firing_rate, fr_power, fr_SNR) matrices.
 
@@ -62,9 +65,14 @@ def run_param_scan(target_stim_dVms, noise_level_Vms, const_params,
     n_noise = len(noise_level_Vms)
     n_dVm = len(target_stim_dVms)
 
+    if firing_rate_bin_size is None:
+        firing_rate_bin_size = const_params["resolution"]
+
+
     firing_rate = np.full((n_noise, n_dVm), np.nan)
     fr_power = np.full((n_noise, n_dVm), np.nan)
     fr_SNR = np.full((n_noise, n_dVm), np.nan)
+    fr_z_score = np.full((n_noise, n_dVm), np.nan)
 
     for i, noise in enumerate(noise_level_Vms):
         for j, dVm in enumerate(target_stim_dVms):
@@ -77,22 +85,25 @@ def run_param_scan(target_stim_dVms, noise_level_Vms, const_params,
                               noise_level_Vm=noise,
                               sim_name=sim_name,
                               save_dir=save_dir,
-                              save_Vm=False)
+                              save_Vm=True)
 
             results = run_single_cell_simulation(**sim_params)
-            # plot_single_cell_results(results, sim_params)
-            power, snr = analyze_firing_rate(
+            plot_single_cell_results(results, sim_params)
+            power, snr, snr2 = analyze_firing_rate(
                 results, const_params["sim_time"], analysis_freq,
                 bin_size=firing_rate_bin_size,  use_welch=use_welch, welch_segments=welch_segments)
 
             firing_rate[i, j] = results["firing_rate"]
             fr_power[i, j] = power
-            fr_SNR[i, j] = snr
+            fr_SNR[i, j] = snr2["snr_peak_ratio"]
+            fr_z_score[i, j] = snr2["z_score"]
+            print("comparison old, new SNR: ", snr, snr2["snr_peak_ratio"])
+            print("z_score: ", snr2["z_score"])
 
-    return firing_rate, fr_power, fr_SNR
+    return firing_rate, fr_power, fr_SNR, fr_z_score
 
 
-def plot_param_scan(firing_rate, fr_power, fr_SNR,
+def plot_param_scan(firing_rate, fr_power, fr_SNR, fr_z_score,
                     target_stim_dVms, noise_level_Vms,
                     analysis_freq=20.0, save_name="param_scan.png",
                     snr_levels=None, n_levels=14):
@@ -111,6 +122,8 @@ def plot_param_scan(firing_rate, fr_power, fr_SNR,
 
     fr_levels = [25, 50, 100, 200, 400, 800, 1600, 3200]
     snr_levels = np.asarray(snr_levels, dtype=float)
+    z_score_levels = np.arange(0, 20)[::2]
+
 
     # Grid of data coordinates: x = noise level, y = target stim dVm. Each
     # matrix is transposed from [noise, dVm] to [dVm, noise] to match (Y, X).
@@ -122,6 +135,8 @@ def plot_param_scan(firing_rate, fr_power, fr_SNR,
         (firing_rate, "Firing rate (Hz)", n_levels, False, "Hz"),
         (fr_power, f"Firing-rate power at {analysis_freq:.0f} Hz", fr_levels, True, "|firing rate|²/Hz"),
         (fr_SNR, f"Firing-rate SNR at {analysis_freq:.0f} Hz", snr_levels, True, ''),
+        (fr_z_score, "z-score for peak at beat frequency", z_score_levels, False, ''),
+
     ]
 
     fig, axes = plt.subplots(1, 3, figsize=(16, 4.8))
@@ -133,12 +148,13 @@ def plot_param_scan(firing_rate, fr_power, fr_SNR,
             # Match the colour normalisation to the manual level range; extend
             # both ends so out-of-range cells still get the end colours.
             norm = LogNorm(vmin=levels[0], vmax=levels[-1])
-            cf = ax.contourf(X, Y, Z, levels=levels, norm=norm, cmap="Greens_r",extend="both")
+            cf = ax.contourf(X, Y, Z, levels=levels, norm=norm, cmap="PuBuGn_r",
+                             extend="both")
             # Overlay labelled contour lines for readability.
             cl = ax.contour(X, Y, Z, levels=levels, colors="k", linewidths=0.4)
             ax.clabel(cl, fmt="%g", fontsize=10)
         else:
-            cf = ax.contourf(X, Y, Z, levels=levels, cmap="Greens_r")
+            cf = ax.contourf(X, Y, Z, levels=levels, cmap="PuBuGn_r")
 
             cl = ax.contour(X, Y, Z, levels=levels, colors="k", linewidths=0.4)
             ax.clabel(cl, fmt="%g", fontsize=10)
@@ -168,6 +184,7 @@ if __name__ == "__main__":
     # which is the frequency at which power/SNR are evaluated.
     analysis_freq = 20.0
     carrier_freq = 1000.0
+    dt = 0.05
 
     # Parameters held constant across the scan.
     const_params = dict(
@@ -178,45 +195,47 @@ if __name__ == "__main__":
         E_m=-60.,
         C=100,
         tau_m=10,
-        resolution=0.1,
-        force_rerun=False,
+        resolution=dt,
+        force_rerun=True,
     )
 
     # Scanned axes:
-    target_stim_dVms = np.linspace(0, 1, 17)   # mV
-    noise_level_Vms = np.linspace(3, 9, 16)    # mV
+    target_stim_dVms = np.linspace(0, 1, 11)   # mV
+    noise_level_Vms = np.linspace(3, 9, 13)    # mV
 
-    rerun_scan = False
-    welch_segments = 8
+    rerun_scan = True
+    welch_segments = 10
     use_welch = True
 
     if rerun_scan:
-        firing_rate, fr_power, fr_SNR = run_param_scan(
+        firing_rate, fr_power, fr_SNR, fr_z_score = run_param_scan(
             target_stim_dVms, noise_level_Vms, const_params,
             analysis_freq=analysis_freq, use_welch=use_welch, welch_segments=welch_segments,)
 
         # Store the matrices (with their axes) for later reuse.
         os.makedirs("results/param_scan", exist_ok=True)
-        np.savez(f"results/param_scan/param_scan_matrices_welch:{use_welch}:{welch_segments}.npz",
+        np.savez(f"results/param_scan/param_scan_matrices_welch:{use_welch}:{welch_segments}_dt{dt}.npz",
                  target_stim_dVms=target_stim_dVms,
                  noise_level_Vms=noise_level_Vms,
                  firing_rate=firing_rate,
                  fr_power=fr_power,
                  fr_SNR=fr_SNR,
-                 analysis_freq=analysis_freq)
+                 analysis_freq=analysis_freq,
+                 fr_z_score=fr_z_score,)
     else:
         # Load the matrices (and their axes) from the previously saved scan.
-        matrix_path = f"results/param_scan/param_scan_matrices_welch:{use_welch}:{welch_segments}.npz"
+        matrix_path = f"results/param_scan/param_scan_matrices_welch:{use_welch}:{welch_segments}_dt{dt}.npz"
         with np.load(matrix_path) as data:
             target_stim_dVms = data["target_stim_dVms"]
             noise_level_Vms = data["noise_level_Vms"]
             firing_rate = data["firing_rate"]
             fr_power = data["fr_power"]
             fr_SNR = data["fr_SNR"]
-            analysis_freq = float(data["analysis_freq"])
+            analysis_freq = float(data["analysis_freq"],)
+            fr_z_score = data["fr_z_score"]
         print(f"Loaded scan matrices from '{matrix_path}'")
 
-    plot_param_scan(firing_rate, fr_power, fr_SNR,
+    plot_param_scan(firing_rate, fr_power, fr_SNR, fr_z_score,
                     target_stim_dVms, noise_level_Vms,
                     analysis_freq=analysis_freq,
-                    save_name=f"param_scan_welch:{use_welch}:{welch_segments}.pdf")
+                    save_name=f"param_scan_welch:{use_welch}:{welch_segments}_dt{dt}.pdf")

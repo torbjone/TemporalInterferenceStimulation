@@ -614,6 +614,11 @@ def plot_network_results(results, sim_params, tlim=[5, 6], max_f=2000,
 
 
 if __name__ == "__main__":
+
+    weight_factor = 4.5
+    target_stim_dVm = 0.3
+    dt = 0.05
+
     sim_params = dict(
         pop_size=10000,
         exc_fraction=0.8,
@@ -623,7 +628,7 @@ if __name__ == "__main__":
         target_stim_dVm=0.3,
         noise_level_Vm=4.0,
         noise_level_Vm_B=0.0,
-        syn_weight=6,
+        syn_weight=weight_factor,
         syn_delay=2,
         syn_delay_std=0.0,
         tau_syn=2.0,
@@ -633,12 +638,12 @@ if __name__ == "__main__":
         tau_m=10,
         n_record_E=5,
         n_record_I=5,
-        pop_rate_bin_size=0.1,
+        pop_rate_bin_size=dt,
         seed=2,
-        resolution=0.1,
+        resolution=dt,
         n_threads=4,
-        sim_name="network_ei_test_0.3",
-        force_rerun=False,
+        sim_name=f"network_ei_test_{target_stim_dVm}_{weight_factor}",
+        force_rerun=True,
         save_Vm=True,
     )
 

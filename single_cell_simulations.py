@@ -143,6 +143,103 @@ def psd_welch(spike_times, sim_time, bin_size=0.1, segments=8,):
 
     return freqs, psd_values
 
+def calculate_spectral_snr_and_zscore(
+    freqs: np.ndarray,
+    psd_signal: np.ndarray,
+    analysis_freq: float,
+    freq_window: float,
+    exclude_window: float = None
+) -> dict:
+    """
+    Calculates the robust Z-score and Peak-above-Median SNR for a specified target peak.
+
+    Parameters
+    ----------
+    freqs : np.ndarray
+        1D array of frequency values (Hz).
+    psd_signal : np.ndarray
+        1D array of Power Spectral Density values corresponding to `freqs`.
+    analysis_freq : float
+        Target frequency of interest f_0 (e.g., beat frequency).
+    freq_window : float
+        Half-width of the local noise analysis window around analysis_freq.
+        Local window spans [analysis_freq - freq_window, analysis_freq + freq_window].
+    exclude_window : float, optional
+        Half-width of the exclusion zone around analysis_freq to mask out the signal
+        peak itself. Defaults to 2 * frequency_step if None.
+
+    Returns
+    -------
+    dict
+        - 'z_score': Robust Z-score (peak height in standard deviations above median noise)
+        - 'snr_peak_ratio': Ratio of peak power to median noise (S_peak / mu_local)
+        - 'snr_excess_ratio': Relative excess power above median ((S_peak - mu_local) / mu_local)
+        - 'snr_db': Peak ratio in dB (10 * log10(snr_peak_ratio))
+        - 'peak_freq': Actual frequency bin location used for the peak
+        - 'peak_power': Power S(f_0) at peak bin
+        - 'median_noise': Local median noise floor (mu_local)
+        - 'mad_std_noise': Scaled MAD estimate of local noise standard deviation (sigma_local)
+    """
+    freqs = np.asarray(freqs)
+    psd_signal = np.asarray(psd_signal)
+
+    # 1. Locate closest frequency bin to target analysis frequency
+    peak_idx = np.argmin(np.abs(freqs - analysis_freq))
+    actual_freq = freqs[peak_idx]
+    peak_power = psd_signal[peak_idx]
+
+    # Frequency bin resolution
+    df = np.median(np.diff(freqs)) if len(freqs) > 1 else 1.0
+
+    # print("df: ", df)
+
+    if exclude_window is None:
+        exclude_window = 2.0 * df
+
+    # 2. Define local window and exclusion masks
+    in_local_window = (freqs >= actual_freq - freq_window) & (freqs <= actual_freq + freq_window)
+    in_exclude_window = (freqs >= actual_freq - exclude_window) & (freqs <= actual_freq + exclude_window)
+
+
+    # Noise region: inside local window, outside peak exclusion zone
+    noise_mask = in_local_window & (~in_exclude_window)
+    noise_psd = psd_signal[noise_mask]
+
+    # print("Len noise mask: ", np.sum(in_local_window), np.sum(in_exclude_window), len(psd_signal), len(freqs), len(noise_psd))
+    # print("Noise freqs: ", freqs[noise_mask])
+    if len(noise_psd) < 3:
+        raise ValueError(
+            f"Insufficient background noise bins ({len(noise_psd)} found). "
+            "Increase `freq_window` or decrease `exclude_window`."
+        )
+
+    # 3. Calculate robust noise statistics
+    median_noise = np.median(noise_psd)
+    mad = np.median(np.abs(noise_psd - median_noise))
+    sigma_noise = 1.4826 * mad  # Normal consistency factor
+
+    # Avoid division by zero
+    sigma_noise = max(sigma_noise, 1e-12)
+    median_noise = max(median_noise, 1e-12)
+
+    # 4. Compute metrics
+    z_score = (peak_power - median_noise) / sigma_noise
+    snr_peak_ratio = peak_power / median_noise
+    snr_excess_ratio = (peak_power - median_noise) / median_noise
+    snr_db = 10.0 * np.log10(max(snr_peak_ratio, 1e-12))
+
+    return {
+        'z_score': float(z_score),
+        'snr_peak_ratio': float(snr_peak_ratio),
+        'snr_excess_ratio': float(snr_excess_ratio),
+        'snr_db': float(snr_db),
+        'peak_freq': float(actual_freq),
+        'peak_power': float(peak_power),
+        'median_noise': float(median_noise),
+        'mad_std_noise': float(sigma_noise),
+        'n_noise_bins': int(len(noise_psd))
+    }
+
 
 def compute_SNR(freqs, psd_values, f):
     """Computes and returns SNR given PSD_values and corresponding frequencies."""
@@ -151,7 +248,7 @@ def compute_SNR(freqs, psd_values, f):
 
     # Frequency closest to f
     arg_f = np.argmin(np.abs(freqs - f))
-    print(f"SNR frequency: {freqs[arg_f]} Hz")
+    print(f"SNR (old) frequency: {freqs[arg_f]} Hz")
     # Finding the indexes of frequencies around the input frequency
     noise_mask = (freqs >= freqs[arg_f] - window) & (freqs <= freqs[arg_f] + window) & (freqs != freqs[arg_f])
 
@@ -239,7 +336,8 @@ def run_single_cell_simulation(sim_time=10e3,
     import nest
 
     nest.ResetKernel()
-    nest.verbosity = nest.VerbosityLevel.WARNING
+    nest.verbosity = nest.VerbosityLevel.INFO
+    nest.SetKernelStatus({"print_time": True})
     nest.SetKernelStatus({"resolution": resolution})
     nest.rng_seed = seed
 
@@ -316,9 +414,10 @@ def run_single_cell_simulation(sim_time=10e3,
         "I_noise": I_noise,
     }
     if save_Vm:
-        results.update({ "Vm": V_m, "times": times ,})
-
-
+        print("SAVING VM")
+        savemask = times < 10000
+        results.update({ "Vm": V_m[savemask], "times": times[savemask] ,})
+        print(len(V_m[savemask]), len(times[savemask]))
     # Save the results together with all input parameters so the run can be
     # loaded (and verified) instead of rerun next time.
     os.makedirs(save_dir, exist_ok=True)
@@ -333,8 +432,8 @@ def run_single_cell_simulation(sim_time=10e3,
 
 
 def plot_single_cell_results(results, sim_params,
-                             welch_segments=1, max_f=2000, tlim=[5, 6],
-                             firing_rate_bin_size=0.1, use_welch=False):
+                             welch_segments=8, max_f=2000, tlim=[5, 6],
+                             firing_rate_bin_size=None, use_welch=True):
     """Analyses and plots the output of run_single_cell_simulation.
 
     Computes the Vm and firing-rate spectra (with their SNR at stim_freq) and
@@ -356,79 +455,109 @@ def plot_single_cell_results(results, sim_params,
     else:
         raise ValueError("stim_freqs must be a list of length 1 or 2")
 
-    print(f"Max Vm deviation: ", np.max(np.abs(results["Vm"] - np.mean(results["Vm"]))))
+    if firing_rate_bin_size is None:
+        firing_rate_bin_size = resolution
+
+    if "Vm" in results:
+        has_vm = True
+        print(f"Max Vm deviation: ", np.max(np.abs(results["Vm"] - np.mean(results["Vm"]))))
+    else:
+        has_vm = False
 
     spike_rate, t_bins = find_spike_rate(results["spike_times"], firing_rate_bin_size, sim_time)
 
     print("Calculating PSDs...")
     if use_welch:
         # Sampling rate (measurements per sec)
-        fs_fr = 1000 / firing_rate_bin_size
+        fs_fr = 1000. / firing_rate_bin_size
+        # print(f"Sampling rate: {fs_fr} Hz")
         freqs_fr, fr_psd = welch(spike_rate, fs=fs_fr, nperseg=len(spike_rate) // welch_segments,
                                   noverlap=(len(spike_rate) // welch_segments) // 2)
-
-        fs = 1000 / resolution
-        freqs_vm, vm_psd = welch(results["Vm"], fs=fs, nperseg=len(results["Vm"]) // welch_segments,
-                                 noverlap=(len(results["Vm"]) // welch_segments) // 2)
+        # print("len fr: ", len(freqs_fr), freqs_fr[:3])
+        if has_vm:
+            fs = 1000 / resolution
+            freqs_vm, vm_psd = welch(results["Vm"], fs=fs, nperseg=len(results["Vm"]) // welch_segments,
+                                     noverlap=(len(results["Vm"]) // welch_segments) // 2)
 
     else:
         freqs_fr, fr_psd = return_freq_and_psd(t_bins, spike_rate)
         fr_psd = fr_psd[0]
+        if has_vm:
+            freqs_vm, vm_psd = return_freq_and_psd(results["times"], results["Vm"])
+            vm_psd = vm_psd[0]
 
-        freqs_vm, vm_psd = return_freq_and_psd(results["times"], results["Vm"])
-        vm_psd = vm_psd[0]
+    fr_SNR_old = compute_SNR(freqs_fr, fr_psd, stim_freq)
 
-    fr_SNR = compute_SNR(freqs_fr, fr_psd, stim_freq)
-    vm_SNR = compute_SNR(freqs_vm, vm_psd, stim_freq)
+    snr_results = calculate_spectral_snr_and_zscore(freqs_fr, fr_psd, stim_freq, freq_window=5)
+    fr_SNR = snr_results['snr_peak_ratio']
+    print("===========")
+    print("Sim name: ", sim_name)
+    print(f"Old SNR: {fr_SNR_old}")
+    print(f"New SNR: {snr_results}")
+
+    if has_vm:
+        vm_SNR_old = compute_SNR(freqs_vm, vm_psd, stim_freq)
+        snr_results_vm = calculate_spectral_snr_and_zscore(freqs_vm, vm_psd, stim_freq, freq_window=5)
+        vm_SNR = snr_results_vm['snr_peak_ratio']
 
     print("Making plot...")
 
     plt.close("all")
     fig = plt.figure(figsize=(10, 9))
     fig.subplots_adjust(wspace=0.5, right=0.98, top=0.95, hspace=0.6)
-    ax_vm = fig.add_subplot(311, ylim=[-61.0, -59.], #ylim=[-75, -44],
-                            xlabel="time (s)", ylabel=r"$V_{\rm m}$ (mV)",
-                            title=r"Firing rate: {0:.2f} Hz; STD($V_m$): {1:.2f} mV".format(
-                                results["firing_rate"], np.std(results["Vm"])))
-    ax_vm_psd = fig.add_subplot(323, title=f"SNR = {vm_SNR:.2f}", xlim=[1, max_f],
-                                xlabel="frequency (Hz)", ylabel=r"|$V_{\rm m}$|²/Hz")
-    ax_fr_psd = fig.add_subplot(324, title=f"SNR = {fr_SNR:.2f}", xlim=[1, max_f],
+    if has_vm:
+
+        if np.std(results["Vm"]) > 1:
+            ylim = [-75, -44]
+        else:
+            ylim = [-61, -59]
+
+        ax_vm = fig.add_subplot(311, ylim=ylim,
+                                xlabel="time (s)", ylabel=r"$V_{\rm m}$ (mV)",
+                                title=r"Firing rate: {0:.2f} Hz; STD($V_m$): {1:.2f} mV".format(
+                                    results["firing_rate"], np.std(results["Vm"])))
+        ax_vm_psd = fig.add_subplot(323, title=f"SNR = {vm_SNR:.2f}", xlim=[1, max_f],
+                                    xlabel="frequency (Hz)", ylabel=r"|$V_{\rm m}$|²/Hz")
+        ax_vm_psd_zoom = fig.add_subplot(325, title=f"SNR = {vm_SNR:.2f}",
+                                         # xlim=[np.min(stim_freqs) - 10, np.max(stim_freqs) + 10],
+                                         xlim=[stim_freq - 10, stim_freq + 10],
+                                         ylim=[0, vm_psd[np.argmin(np.abs(freqs_vm - stim_freq))] * 5],
+                                         xlabel="frequency (Hz)", ylabel=r"|$V_{\rm m}$|²/Hz")
+        ax_vm.plot(results["times"] / 1000, results["Vm"], 'k')
+        ax_vm.set_xlim(tlim)
+        for t in results["spike_times"]:
+            ax_vm.vlines(x=t / 1000, ymin=V_th, ymax=V_th + 5, color="r")
+
+        ax_vm_psd.axvline(x=stim_freq, lw=0.5, ls='--', color='gray')
+        ax_vm_psd_zoom.axvline(x=stim_freq, lw=0.5, ls='--', color='gray')
+
+        ax_vm_psd_zoom.plot(freqs_vm[freqs_vm < max_f], vm_psd[freqs_vm < max_f], 'k')
+        ax_vm_psd.loglog(freqs_vm[freqs_vm < max_f], vm_psd[freqs_vm < max_f], 'k')
+
+    ax_fr_psd = fig.add_subplot(324, title=f"SNR = {fr_SNR:.2f}; z-score = {snr_results['z_score']:.2f}", xlim=[1, max_f],
                                 xlabel="frequency (Hz)", ylabel="|firing rate|²/Hz")
 
-    ax_vm_psd_zoom = fig.add_subplot(325, title=f"SNR = {vm_SNR:.2f}",
-                                     # xlim=[np.min(stim_freqs) - 10, np.max(stim_freqs) + 10],
-                                     xlim=[stim_freq - 10, stim_freq + 10],
-                                     ylim=[0, vm_psd[np.argmin(np.abs(freqs_vm - stim_freq))] * 5],
-                                     xlabel="frequency (Hz)", ylabel=r"|$V_{\rm m}$|²/Hz")
-    ax_fr_psd_zoom = fig.add_subplot(326, title=f"SNR = {fr_SNR:.2f}",
+
+    ax_fr_psd_zoom = fig.add_subplot(326,
                                      # xlim=[np.min(stim_freqs) - 10, np.max(stim_freqs) + 10],
                                      xlim=[stim_freq - 10, stim_freq + 10],
                                      ylim=[0, fr_psd[np.argmin(np.abs(freqs_fr - stim_freq))] * 1.2],
                                      xlabel="frequency (Hz)", ylabel="|firing rate|²/Hz")
 
-    ax_vm.plot(results["times"] / 1000, results["Vm"], 'k')
-    ax_vm.set_xlim(tlim)
-    for t in results["spike_times"]:
-        ax_vm.vlines(x=t / 1000, ymin=V_th, ymax=V_th + 5, color="r")
 
-    ax_vm_psd.axvline(x=stim_freq, lw=0.5, ls='--', color='gray')
     ax_fr_psd.axvline(x=stim_freq, lw=0.5, ls='--', color='gray')
-    ax_vm_psd_zoom.axvline(x=stim_freq, lw=0.5, ls='--', color='gray')
     ax_fr_psd_zoom.axvline(x=stim_freq, lw=0.5, ls='--', color='gray')
 
-    ax_vm_psd.loglog(freqs_vm[freqs_vm < max_f], vm_psd[freqs_vm < max_f], 'k')
     ax_fr_psd.loglog(freqs_fr[freqs_fr < max_f], fr_psd[freqs_fr < max_f], 'k')
 
-    ax_vm_psd_zoom.plot(freqs_vm[freqs_vm < max_f], vm_psd[freqs_vm < max_f], 'k')
     ax_fr_psd_zoom.plot(freqs_fr[freqs_fr < max_f], fr_psd[freqs_fr < max_f], 'k')
 
     simplify_axes(fig.axes)
 
-    plt.savefig(f"{sim_name}_{welch_segments}_{int(sim_time / 1000)}s.pdf")
+    plt.savefig(os.path.join(
+                     f"{sim_name}_{welch_segments}_{int(sim_time / 1000)}s.pdf"))
 
     return fig
-
-
 
 
 def _stim_freq_from_f_values(f_values):
@@ -718,10 +847,15 @@ def plot_compare_Vms(sim_list):
 
     ax1.legend(frameon=False, ncol=4, loc=(0.25,-.4))
     simplify_axes(ax1)
-    fig.savefig("vm_compare.pdf")
+    fig.savefig("vm_compare_dt:0.01.pdf")
 
 
 if __name__ == "__main__":
+
+    dt = 0.05
+    force_rerun = True
+    welch_segments = 10
+
     sim_params_1ABC = dict(
         sim_time=10000e3,
         target_stim_dVm=0.0,
@@ -729,11 +863,25 @@ if __name__ == "__main__":
         noise_level_Vm=4.,
         seed=2,
         V_th=-50.,
-        resolution=0.1,
-        sim_name="Fig1A-C",
-        force_rerun=False,
+        resolution=dt,
+        sim_name=f"Fig1A-C_dt:{dt}",
+        force_rerun=force_rerun,
         description="only noise",
     )
+
+    sim_params_S0 = dict(
+        sim_time=1000e3,
+        target_stim_dVm=0.0,
+        f_values=[20],
+        noise_level_Vm=4.,
+        seed=2,
+        V_th=-00.,
+        resolution=dt,
+        sim_name=f"FigS0_dt:{dt}",
+        force_rerun=force_rerun,
+        description="only noise - high spike threshold",
+    )
+
 
     sim_params_S1 = dict(
         sim_time=10e3,
@@ -742,9 +890,9 @@ if __name__ == "__main__":
         noise_level_Vm=0.,
         seed=2,
         V_th=-50.,
-        resolution=0.1,
-        sim_name="FigS1",
-        force_rerun=False,
+        resolution=dt,
+        sim_name=f"FigS1_dt:{dt}",
+        force_rerun=force_rerun,
         description="only stimulation",
     )
 
@@ -755,9 +903,9 @@ if __name__ == "__main__":
         noise_level_Vm=4.,
         seed=2,
         V_th=-50.,
-        resolution=0.1,
-        sim_name="Fig1D-F",
-        force_rerun=False,
+        resolution=dt,
+        sim_name=f"Fig1D-F_dt:{dt}",
+        force_rerun=force_rerun,
         description="20 Hz stimulation",
     )
 
@@ -768,9 +916,9 @@ if __name__ == "__main__":
         noise_level_Vm=0.,
         seed=2,
         V_th=-50.,
-        resolution=0.1,
-        sim_name="FigS2",
-        force_rerun=False,
+        resolution=dt,
+        sim_name=f"FigS2_dt:{dt}",
+        force_rerun=force_rerun,
     )
 
     sim_params_1GHI = dict(
@@ -780,9 +928,9 @@ if __name__ == "__main__":
         noise_level_Vm=4.,
         seed=2,
         V_th=-50.,
-        resolution=0.1,
-        sim_name="Fig1G-I",
-        force_rerun=False,
+        resolution=dt,
+        sim_name=f"Fig1G-I_dt:{dt}",
+        force_rerun=force_rerun,
         description="1000 Hz stimulation",
     )
 
@@ -793,9 +941,9 @@ if __name__ == "__main__":
         noise_level_Vm=0.,
         seed=2,
         V_th=-50.,
-        resolution=0.1,
-        sim_name="FigS3b",
-        force_rerun=False,
+        resolution=dt,
+        sim_name=f"FigS3b_dt:{dt}",
+        force_rerun=force_rerun,
     )
 
     sim_params_1JKL = dict(
@@ -805,22 +953,24 @@ if __name__ == "__main__":
         noise_level_Vm=4.,
         seed=2,
         V_th=-50.,
-        resolution=0.1,
-        sim_name="Fig1J-L",
-        force_rerun=False,
+        resolution=dt,
+        sim_name=f"Fig1J-L_dt:{dt}",
+        force_rerun=force_rerun,
         description="TI stimulation",
     )
 
     sim_params_list = [sim_params_S1, sim_params_S2, sim_params_S3]
     fig_1_list = [sim_params_1ABC, sim_params_1DEF, sim_params_1GHI, sim_params_1JKL]
 
-    # for sim_params in sim_params_list:
-    results = run_single_cell_simulation(**sim_params_S3)
-    plot_single_cell_results(results, sim_params_S3, tlim=[5, 6])
+    for sim_params in [sim_params_1JKL]: #sim_params_list + fig_1_list:
+        results = run_single_cell_simulation(**sim_params)
+        plot_single_cell_results(results, sim_params, welch_segments=welch_segments, tlim=[5, 6])
+        # plot_single_cell_results(results, sim_params, tlim=[5, 5.01])
 
     # for psd_segments in [1, 2, 4, 6, 8, 10, 16]:
     #     print("PSD segments: ", psd_segments, "")
     #     plot_combined_single_cell_examples(fig_1_list, psd_segments=psd_segments, save_name=f"Fig1_combined_{psd_segments}psd_segments.png")
+
     # plot_combined_single_cell_examples(fig_1_list, psd_segments=8, save_name=f"Fig1_combined_{8}psd_segments.pdf")
 
-    # plot_compare_Vms(fig_1_list)
+    #plot_compare_Vms(fig_1_list)
