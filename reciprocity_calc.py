@@ -8,7 +8,7 @@ from lfpykit import CurrentDipoleMoment
 from lfpykit.eegmegcalc import NYHeadModel
 #from brainsignals import neural_simulations as ns
 #from brainsignals.plotting_convention import simplify_axes, mark_subplots
-
+from single_cell_simulations import return_freq_and_psd
 import ssl
 import json
 import shutil
@@ -345,6 +345,7 @@ def return_freq_and_amplitude(tvec, sig):
     amplitude = np.abs(Y)/Y.shape[1]
     return freqs, amplitude
 
+
 def mark_subplots(axes, letters='ABCDEFGHIJKLMNOPQRSTUVWXYZ', xpos=-0.12, ypos=1.15):
 
     if not type(axes) is list:
@@ -354,9 +355,10 @@ def mark_subplots(axes, letters='ABCDEFGHIJKLMNOPQRSTUVWXYZ', xpos=-0.12, ypos=1
         ax.text(xpos, ypos, letters[idx].capitalize(),
                 horizontalalignment='center',
                 verticalalignment='center',
-                fontweight='demibold',
+                fontweight='bold',
                 fontsize=10,
                 transform=ax.transAxes)
+
 
 def simplify_axes(axes):
 
@@ -409,6 +411,12 @@ def run_RT_based_simulation(cell_name, dt, tstop, cutoff, input_idx,
 
     eeg = lead_field * p[2, :] * 1E-9
 
+    # 1 nA / Hz intracellular stim to 5 mA / Hz TES. Gives Vm response to TES in mV / Hz
+    vm_response_RT = eeg * 5e6
+
+    # EEG to nV
+    eeg *= 1e6
+
     print("p: ", p)
     print("EEG: ", eeg)
     print(np.std(p))
@@ -426,29 +434,42 @@ def run_RT_based_simulation(cell_name, dt, tstop, cutoff, input_idx,
     freqs, yf1 = return_freq_and_amplitude(cell.tvec, noise_vec)
     freqs, yf2 = return_freq_and_amplitude(cell.tvec, p)
     freqs, yf3 = return_freq_and_amplitude(cell.tvec, eeg)
+    freqs, vm_response_RT_PSD = return_freq_and_amplitude(cell.tvec, vm_response_RT)
 
-    fig = plt.figure(figsize=(10, 6))
-    fig.subplots_adjust(wspace=0.5, right=0.98, top=0.95, hspace=0.6)
 
-    ax_neur = fig.add_subplot([0.0, 0., 0.3, 0.99], aspect=1, frameon=False,
+    fig = plt.figure(figsize=(12, 5))
+    fig.subplots_adjust(wspace=0.6, right=0.98, top=0.90, hspace=0.4, left=0.07, bottom=0.1)
+
+    # ax_neur = fig.add_subplot([0.0, 0., 0.25, 0.99], aspect=1, frameon=False,
+    #                           xticks=[], yticks=[])
+
+    ax_neur = fig.add_subplot(151, aspect=1, frameon=False,
                               xticks=[], yticks=[])
 
-    ax1 = fig.add_subplot(332, xlabel="time (ms)", ylabel="input (nA)")
-    ax2 = fig.add_subplot(335, xlabel="time (ms)", ylabel="$p_z$ (nAµm)")
-    ax3 = fig.add_subplot(338, xlabel="time (ms)", ylabel="EEG µV")
+    ax1 = fig.add_subplot(252, xlabel="time (ms)", ylabel="nA", title="input current")
+    ax1_psd = fig.add_subplot(257, xlabel="frequency (Hz)", ylabel="nA/Hz",
+                              ylim=[np.median(yf1) / 10, np.median(yf1) * 10])
 
-    ax1_psd = fig.add_subplot(333, xlabel="frequency (Hz)", ylabel="input (nA)", ylim=[1e-1, 1e1])
-    ax2_psd = fig.add_subplot(336, xlabel="frequency (Hz)", ylabel="$p_z$ (nAµm)")
-    ax3_psd = fig.add_subplot(339, xlabel="frequency (Hz)", ylabel="EEG (µV)")
+    ax2 = fig.add_subplot(253, xlabel="time (ms)", ylabel="nAµm", title="current dipole moment")
+    ax2_psd = fig.add_subplot(258, xlabel="frequency (Hz)", ylabel="nAµm/Hz")
+
+    ax3 = fig.add_subplot(254, xlabel="time (ms)", ylabel="nV", title="EEG")
+    ax3_psd = fig.add_subplot(259, xlabel="frequency (Hz)", ylabel="nV/Hz")
+
+    # ax_pn = fig.add_subplot(2, 5, 5, frameon=False,
+    #                          xticks=[], yticks=[])
+    ax4_psd = fig.add_subplot(2, 5, 10, xlabel="frequency (Hz)", ylabel=r"mV/Hz",
+                              title=r"$V_{\rm m}$ responses")
+
 
     ax_neur.plot(cell.x.T, cell.z.T, c='k', lw=0.5, zorder=1)
-
+    ax_neur.plot(cell.x[0].mean(), cell.z[0].mean(), 'ok', ms=5)
     ax1.plot(cell.tvec, noise_vec, c='k')
     ax2.plot(cell.tvec, p[2, :], label="$P_z$")
     ax2.plot(cell.tvec, p[1, :], label="$P_y$")
     ax2.plot(cell.tvec, p[0, :], label="$P_x$")
 
-    ax3.plot(cell.tvec, eeg * 1e3, c='k')
+    ax3.plot(cell.tvec, eeg, c='k')
 
     ax1_psd.loglog(freqs, yf1[0], c='k')
     ax2_psd.loglog(freqs, yf2[0], label="$P_x$")
@@ -456,16 +477,40 @@ def run_RT_based_simulation(cell_name, dt, tstop, cutoff, input_idx,
     ax2_psd.loglog(freqs, yf2[2], label="$P_z$")
     ax3_psd.loglog(freqs, yf3[0] * 1e3, c='k')
 
+    dVm_pn = point_neuron_stim_response(freqs)
+    l1, = ax4_psd.loglog(freqs, vm_response_RT_PSD[0], 'k')
+    l2, = ax4_psd.loglog(freqs, dVm_pn / dVm_pn[0] * np.max(vm_response_RT_PSD) , c='r')
+
+    ax4_psd.legend([l1, l2], ["TES to human\nPC model",
+                              "current input\nto point neuron"],
+                   frameon=False, ncol=1, loc=(0., 1.3))
+
     ax2_psd.legend(frameon=False, ncol=1, loc="upper right")
     # ax2.legend(frameon=False, ncol=1, loc="upper right")
 
+    mark_subplots(ax_neur, "A", ypos=1, xpos=0.1)
+    mark_subplots(fig.axes)
     simplify_axes(fig.axes)
     fig.savefig(f"control_RT_sim_{cell_name}.png")
     fig.savefig(f"control_RT_sim_{cell_name}.pdf")
     plt.close(fig)
 
+    plt.show()
+
     return eeg
 
+def point_neuron_stim_response(f, tau_m=10., C_m=100.):
+    """
+    The neuron's subthreshold RC response gives
+        |dVm| = I_amp * R / sqrt(1 + (2*pi*f*tau_m)^2),
+    with membrane resistance R = tau_m / C_m (matching NEST's tau_m = R*C_m).
+    """
+    tau_si = tau_m * 1e-3            # ms -> s
+    C_si = C_m * 1e-12              # pF -> F
+    R_si = tau_si / C_si            # Ohm; R = tau_m / C_m
+    I_si = 1e-9  # nA -> A
+    dVm = I_si * R_si / np.sqrt(1 + (2*np.pi*f*tau_si)**2)
+    return dVm
 
 eeg = run_RT_based_simulation(cell_name, dt, tstop, cutoff, input_idx,
                                            stim_current, tES_field)

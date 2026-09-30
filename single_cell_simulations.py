@@ -1,7 +1,8 @@
 import os
+import sys
 import pickle
 import math
-
+from os.path import join
 import numpy as np
 import matplotlib.pyplot as plt
 
@@ -49,6 +50,95 @@ def find_noise_std(noise_level_Vm, tau_m=10., C_m=100., resolution=0.1):
     return sigma_I / 1e-12         # A -> pA
 
 
+def find_multisine_noise_amp(noise_level_Vm, freqs, tau_m=10., C_m=100.):
+    """Per-frequency sinusoidal current amplitude (pA) for multisine noise
+    distributed across `freqs` (Hz) that produces a membrane-potential
+    standard deviation of `noise_level_Vm` mV in an iaf_psc_alpha neuron.
+
+    Each sinusoidal component I_k * sin(2*pi*f_k*t + phi_k) produces a steady-state
+    subthreshold membrane potential fluctuation with variance
+        Var(dVm_k) = 0.5 * (I_0 * R)^2 / (1 + (2*pi*f_k*tau_m)^2)
+    Summing over all orthogonal frequencies and inverting for I_0 yields
+        I_0 = sigma_V / (R * sqrt(0.5 * sum_k 1 / (1 + (2*pi*f_k*tau_m)^2)))
+    `tau_m` is in ms and `C_m` in pF. Returns amplitude in pA."""
+    if noise_level_Vm == 0.0 or len(freqs) == 0:
+        return 0.0
+    tau_si = tau_m * 1e-3            # ms -> s
+    C_si = C_m * 1e-12              # pF -> F
+    R_si = tau_si / C_si            # Ohm; R = tau_m / C_m
+    freqs_arr = np.asarray(freqs, dtype=float)
+    sum_denom = np.sum(1.0 / (1.0 + (2 * np.pi * freqs_arr * tau_si)**2))
+    sigma_V = noise_level_Vm * 1e-3  # mV -> V
+    I_si = sigma_V / (R_si * np.sqrt(0.5 * sum_denom))
+    return I_si / 1e-12             # A -> pA
+
+
+def generate_multisine_current(sim_time, cutoff, resolution, noise_level_Vm,
+                               noise_freqs=None, tau_m=10., C_m=100.,
+                               seed=2, max_f=3200.0):
+    """Generates discrete time vector and multisine current array (pA) calibrated
+    to induce a membrane-potential standard deviation of `noise_level_Vm` mV.
+
+    The frequency grid is constructed for the analysis period `sim_time` (the signal
+    duration after removing the initial `cutoff` period). The multisine signal is
+    generated across the full duration `sim_time + cutoff` so that the stimulation
+    is active for the entire simulation, but retains exact harmonic frequency
+    orthogonality when the initial `cutoff` is removed.
+
+    Returns (tvec, I_t, noise_freqs, I_0_pA).
+    """
+    total_time = sim_time + cutoff  # ms
+    dt = resolution                # ms
+    n_points_total = int(round(total_time / dt)) + 1
+    tvec = np.arange(n_points_total) * dt
+
+    if noise_level_Vm == 0.0:
+        freqs = np.array([]) if noise_freqs is None else np.asarray(noise_freqs, dtype=float)
+        return tvec, np.zeros(len(tvec)), freqs, 0.0
+
+    np_rng = np.random.RandomState(seed)
+
+    if noise_freqs is None:
+        n_points_stim = int(round(sim_time / dt))
+        fft_freqs = np.fft.rfftfreq(n_points_stim, d=dt * 1e-3)
+        mask = (fft_freqs >= 1) & (fft_freqs <= max_f)
+        freqs = fft_freqs[mask]
+
+        if len(freqs) == 0:
+            return tvec, np.zeros(len(tvec)), freqs, 0.0
+
+        I_0_pA = find_multisine_noise_amp(noise_level_Vm, freqs, tau_m=tau_m, C_m=C_m)
+        phases = np_rng.uniform(0, 2 * np.pi, size=len(freqs))
+
+        # Real sinusoidal signal over one sim_time period:
+        # sum_k I_0 * sin(2*pi*f_k*t + phi_k) = sum_k I_0 * cos(2*pi*f_k*t + phi_k - pi/2)
+        X = np.zeros(len(fft_freqs), dtype=complex)
+        X[mask] = (n_points_stim / 2.0) * I_0_pA * np.exp(1j * (phases - np.pi / 2.0))
+        I_stim = np.fft.irfft(X, n=n_points_stim)
+
+        # Extend periodically across the full simulation time (cutoff + sim_time)
+        num_repeats = int(np.ceil(n_points_total / n_points_stim)) + 1
+        I_t = np.tile(I_stim, num_repeats)[:n_points_total]
+    else:
+        freqs = np.asarray(noise_freqs, dtype=float)
+        if len(freqs) == 0:
+            return tvec, np.zeros(len(tvec)), freqs, 0.0
+
+        I_0_pA = find_multisine_noise_amp(noise_level_Vm, freqs, tau_m=tau_m, C_m=C_m)
+        phases = np_rng.uniform(0, 2 * np.pi, size=len(freqs))
+
+        I_t = np.zeros(len(tvec))
+        # Vectorized chunked summation for memory efficiency and speed
+        chunk_size = 100
+        for i in range(0, len(freqs), chunk_size):
+            f_chunk = freqs[i:i + chunk_size]
+            p_chunk = phases[i:i + chunk_size]
+            angles = 2 * np.pi * (tvec[:, None] * 1e-3) * f_chunk[None, :] + p_chunk[None, :]
+            I_t += I_0_pA * np.sum(np.sin(angles), axis=1)
+
+    return tvec, I_t, freqs, I_0_pA
+
+
 def return_freq_and_psd(tvec, sig):
     """ Returns the amplitude and frequency of the input signal"""
     import scipy.fftpack as ff
@@ -62,7 +152,7 @@ def return_freq_and_psd(tvec, sig):
     timestep = (tvec[1] - tvec[0])/1000. if type(tvec) in [list, np.ndarray] else tvec
 
     sample_freq = ff.fftfreq(sig.shape[1], d=timestep)
-    pidxs = np.where(sample_freq > 0)
+    pidxs = np.where(sample_freq >= 1)
     freqs = sample_freq[pidxs]
 
     Y = ff.fft(sig, axis=1)[:, pidxs[0]]
@@ -267,14 +357,17 @@ def compute_SNR(freqs, psd_values, f):
 
 
 def run_single_cell_simulation(sim_time=10e3,
-                               f_values=[10.0], target_stim_dVm=0.3, noise_level_Vm=4.0, C=100,
+                               f_values=[10.0], target_stim_dVm=0.3,
+                               noise_level_Vm=4.0,
+                               noise_type="gaussian", noise_freqs=None,
+                               C=100,
                                V_th=-50.0, E_m=-60.0, tau_m=10,
                                seed=2, resolution=0.1, sim_name="test",
                                save_dir="results", force_rerun=False,
-                               save_Vm=True, description=""):
+                               save_Vm="cut", description=""):
     """This function creates:
     -Single iaf_psc_alpha neuron (LIF w/alpha-shaped postsynaptic currents)
-    -noise using a noise_generator to get noise from Gaussian distribution
+    -noise using a noise_generator (Gaussian distribution) or step_current_generator (multisine)
     -spike_recorder to get the spike times
     -multimeter to plot the membrane potential manually
     -deterministic sinusoidal inputs using AC_generators
@@ -288,12 +381,14 @@ def run_single_cell_simulation(sim_time=10e3,
     -V_th : threshold potential
     -sim_time: Simulation time
     -times : times when Vm was recorded
+    -noise_type: Type of noise applied ("gaussian" or "multisine")
 
     The results are saved to a pickle file (together with all input
     parameters) inside ``save_dir``. On subsequent calls the function will
     load the saved results instead of rerunning the simulation, provided the
     saved parameters exactly match the current input parameters. Set
-    ``force_rerun=True`` to always rerun and overwrite the saved file."""
+    ``force_rerun=True`` to always rerun and overwrite the saved file.
+    save_Vm can be "full" or "cut" (default: "full")"""
 
     # All input parameters that define the simulation. Saved together with the
     # results so that a cached run can be verified against the current request.
@@ -302,6 +397,8 @@ def run_single_cell_simulation(sim_time=10e3,
         "f_values": f_values,
         "target_stim_dVm": target_stim_dVm,
         "noise_level_Vm": noise_level_Vm,
+        "noise_type": noise_type,
+        "noise_freqs": noise_freqs if (noise_freqs is None or isinstance(noise_freqs, list)) else list(noise_freqs),
         "C": C,
         "V_th": V_th,
         "E_m": E_m,
@@ -326,7 +423,15 @@ def run_single_cell_simulation(sim_time=10e3,
             saved = None
 
         if saved is not None:
-            if saved.get("params") == params:
+            saved_params = saved.get("params", {})
+            params_match = (saved_params == params)
+            # Support backwards compatibility with legacy cache files created before noise_type
+            if not params_match and noise_type == "gaussian" and noise_freqs is None:
+                legacy_params = {k: v for k, v in params.items() if k not in ("noise_type", "noise_freqs")}
+                if saved_params == legacy_params:
+                    params_match = True
+
+            if params_match:
                 print(f"Loading saved results from '{save_path}'")
                 return saved["results"]
 
@@ -353,18 +458,44 @@ def run_single_cell_simulation(sim_time=10e3,
     neuron.set(I_e=0)
     neuron.set(tau_m=tau_m)
 
-    # Convert the requested Vm noise level (mV std) into the noise_generator
-    # current std (pA) via the neuron's subthreshold RC response, so the noise
-    # alone drives a `noise_level_Vm` mV standard deviation of the membrane.
-    I_noise = find_noise_std(noise_level_Vm, tau_m=tau_m, C_m=C, resolution=resolution)
+    if noise_type == "gaussian":
+        # Convert the requested Vm noise level (mV std) into the noise_generator
+        # current std (pA) via the neuron's subthreshold RC response, so the noise
+        # alone drives a `noise_level_Vm` mV standard deviation of the membrane.
+        I_noise = find_noise_std(noise_level_Vm, tau_m=tau_m, C_m=C, resolution=resolution)
 
-    noise = nest.Create(
-        "noise_generator",
-        1,
-        params=[
-            {"mean": 0.0, "std": I_noise, "dt": resolution},
-        ]
-    )
+        noise = nest.Create(
+            "noise_generator",
+            1,
+            params=[
+                {"mean": 0.0, "std": I_noise, "dt": resolution},
+            ]
+        )
+    elif noise_type == "multisine":
+        # Option B: Precomputed multisine noise via step_current_generator
+        tvec_noise, I_t, noise_freqs_used, I_noise = generate_multisine_current(
+            sim_time=sim_time,
+            cutoff=cutoff,
+            resolution=resolution,
+            noise_level_Vm=noise_level_Vm,
+            noise_freqs=noise_freqs,
+            tau_m=tau_m,
+            C_m=C,
+            seed=seed,
+        )
+        amp_times = tvec_noise[tvec_noise >= resolution]
+        amp_values = I_t[tvec_noise >= resolution]
+        noise = nest.Create(
+            "step_current_generator",
+            params={
+                "amplitude_times": list(amp_times),
+                "amplitude_values": list(amp_values),
+            }
+        )
+
+
+    else:
+        raise ValueError(f"Unknown noise_type '{noise_type}'. Must be 'gaussian' or 'multisine'.")
 
     multimeter = nest.Create(
         "multimeter",
@@ -393,7 +524,7 @@ def run_single_cell_simulation(sim_time=10e3,
     nest.Connect(multimeter, neuron)
     nest.Connect(neuron, spike_recorder)
     nest.Connect(sine, neuron)
-    nest.Connect(noise[0], neuron)
+    nest.Connect(noise, neuron)
 
     # Simulating and recording results
     nest.Simulate(sim_time + cutoff + 1)
@@ -402,7 +533,7 @@ def run_single_cell_simulation(sim_time=10e3,
     events = spike_recorder.get("events")
     ts = events["times"] - cutoff
     V_m = mm_data["V_m"]
-    times = np.arange(len(V_m)) * resolution #mm_data["times"] - cutoff
+    times = np.arange(len(V_m)) * resolution
 
     # Return results
     results = {
@@ -412,12 +543,17 @@ def run_single_cell_simulation(sim_time=10e3,
         "I_amp": I_amp,
         "noise_level_Vm": noise_level_Vm,
         "I_noise": I_noise,
+        "noise_type": noise_type,
     }
-    if save_Vm:
-        print("SAVING VM")
+    if save_Vm == "cut":
         savemask = times < 10000
         results.update({ "Vm": V_m[savemask], "times": times[savemask] ,})
-        print(len(V_m[savemask]), len(times[savemask]))
+    elif save_Vm == "full":
+        results.update({ "Vm": V_m, "times": times ,})
+    elif save_Vm == "none":
+        pass
+    else:
+        raise ValueError("save_Vm must be 'full', 'cut' or 'none'")
     # Save the results together with all input parameters so the run can be
     # loaded (and verified) instead of rerun next time.
     os.makedirs(save_dir, exist_ok=True)
@@ -432,8 +568,8 @@ def run_single_cell_simulation(sim_time=10e3,
 
 
 def plot_single_cell_results(results, sim_params,
-                             welch_segments=8, max_f=2000, tlim=[5, 6],
-                             firing_rate_bin_size=None, use_welch=True):
+                             welch_segments=8, max_f=3000, tlim=[5, 6],
+                             firing_rate_bin_size=None, use_welch=True, fig_folder="figures"):
     """Analyses and plots the output of run_single_cell_simulation.
 
     Computes the Vm and firing-rate spectra (with their SNR at stim_freq) and
@@ -482,18 +618,20 @@ def plot_single_cell_results(results, sim_params,
     else:
         freqs_fr, fr_psd = return_freq_and_psd(t_bins, spike_rate)
         fr_psd = fr_psd[0]
+
+
         if has_vm:
             freqs_vm, vm_psd = return_freq_and_psd(results["times"], results["Vm"])
             vm_psd = vm_psd[0]
-
+            print(freqs_vm)
     fr_SNR_old = compute_SNR(freqs_fr, fr_psd, stim_freq)
 
     snr_results = calculate_spectral_snr_and_zscore(freqs_fr, fr_psd, stim_freq, freq_window=5)
     fr_SNR = snr_results['snr_peak_ratio']
-    print("===========")
-    print("Sim name: ", sim_name)
-    print(f"Old SNR: {fr_SNR_old}")
-    print(f"New SNR: {snr_results}")
+    # print("===========")
+    # print("Sim name: ", sim_name)
+    # print(f"Old SNR: {fr_SNR_old}")
+    # print(f"New SNR: {snr_results}")
 
     if has_vm:
         vm_SNR_old = compute_SNR(freqs_vm, vm_psd, stim_freq)
@@ -514,8 +652,8 @@ def plot_single_cell_results(results, sim_params,
 
         ax_vm = fig.add_subplot(311, ylim=ylim,
                                 xlabel="time (s)", ylabel=r"$V_{\rm m}$ (mV)",
-                                title=r"Firing rate: {0:.2f} Hz; STD($V_m$): {1:.2f} mV".format(
-                                    results["firing_rate"], np.std(results["Vm"])))
+                                title=r"Firing rate: {0:.2f} Hz; STD($V_m$): {1:.2f} mV; {2}".format(
+                                    results["firing_rate"], np.std(results["Vm"]), sim_params["description"]))
         ax_vm_psd = fig.add_subplot(323, title=f"SNR = {vm_SNR:.2f}", xlim=[1, max_f],
                                     xlabel="frequency (Hz)", ylabel=r"|$V_{\rm m}$|²/Hz")
         ax_vm_psd_zoom = fig.add_subplot(325, title=f"SNR = {vm_SNR:.2f}",
@@ -534,27 +672,30 @@ def plot_single_cell_results(results, sim_params,
         ax_vm_psd_zoom.plot(freqs_vm[freqs_vm < max_f], vm_psd[freqs_vm < max_f], 'k')
         ax_vm_psd.loglog(freqs_vm[freqs_vm < max_f], vm_psd[freqs_vm < max_f], 'k')
 
-    ax_fr_psd = fig.add_subplot(324, title=f"SNR = {fr_SNR:.2f}; z-score = {snr_results['z_score']:.2f}", xlim=[1, max_f],
+    ax_fr_psd = fig.add_subplot(324, title=f"SNR = {fr_SNR:.2f}; z-score = {snr_results['z_score']:.2f}",
+                                xlim=[1, max_f],
                                 xlabel="frequency (Hz)", ylabel="|firing rate|²/Hz")
 
 
-    ax_fr_psd_zoom = fig.add_subplot(326,
-                                     # xlim=[np.min(stim_freqs) - 10, np.max(stim_freqs) + 10],
-                                     xlim=[stim_freq - 10, stim_freq + 10],
-                                     ylim=[0, fr_psd[np.argmin(np.abs(freqs_fr - stim_freq))] * 1.2],
-                                     xlabel="frequency (Hz)", ylabel="|firing rate|²/Hz")
+    if np.max(np.abs(fr_psd)) > 0:
+        ax_fr_psd_zoom = fig.add_subplot(326,
+                                         # xlim=[np.min(stim_freqs) - 10, np.max(stim_freqs) + 10],
+                                         xlim=[stim_freq - 10, stim_freq + 10],
+                                         ylim=[0, fr_psd[np.argmin(np.abs(freqs_fr - stim_freq))] * 1.2],
+                                         xlabel="frequency (Hz)", ylabel="|firing rate|²/Hz")
 
 
-    ax_fr_psd.axvline(x=stim_freq, lw=0.5, ls='--', color='gray')
-    ax_fr_psd_zoom.axvline(x=stim_freq, lw=0.5, ls='--', color='gray')
+        ax_fr_psd.axvline(x=stim_freq, lw=0.5, ls='--', color='gray')
+        ax_fr_psd_zoom.axvline(x=stim_freq, lw=0.5, ls='--', color='gray')
 
-    ax_fr_psd.loglog(freqs_fr[freqs_fr < max_f], fr_psd[freqs_fr < max_f], 'k')
+        ax_fr_psd.loglog(freqs_fr[freqs_fr < max_f], fr_psd[freqs_fr < max_f], 'k')
 
-    ax_fr_psd_zoom.plot(freqs_fr[freqs_fr < max_f], fr_psd[freqs_fr < max_f], 'k')
+        ax_fr_psd_zoom.plot(freqs_fr[freqs_fr < max_f], fr_psd[freqs_fr < max_f], 'k')
 
     simplify_axes(fig.axes)
 
-    plt.savefig(os.path.join(
+    os.makedirs(fig_folder, exist_ok=True)
+    plt.savefig(os.path.join(fig_folder,
                      f"{sim_name}_{welch_segments}_{int(sim_time / 1000)}s.pdf"))
 
     return fig
@@ -592,13 +733,15 @@ def _apply_nb_style(ax):
     ax.grid(False)
 
 
-def plot_combined_single_cell_examples(fig_1_list, max_f=1800, tlim=[5, 5.2],
-                                       firing_rate_bin_size=0.1,
+def plot_combined_single_cell_examples(fig_1_list, max_f=2200, tlim=[6, 6.2],
+                                       firing_rate_bin_size=None,
                                        vm_ylim=(-72, -44),
-                                       time_scale_ms=50.0, amp_scale_mV=10.0,
+                                       time_scale_ms=50.0,
+                                       amp_scale_mV=10.0,
                                        carrier_zoom_margin=10.0,
                                        colors=None,
                                        psd_segments=None,
+                                       fig_folder="figures",
                                        save_name="combined_single_cell_examples.png"):
     """Plot several single-cell simulations overlaid in one figure, in the
     visual style of 'psd-single-neuron (3).ipynb' (light-grey background,
@@ -640,7 +783,7 @@ def plot_combined_single_cell_examples(fig_1_list, max_f=1800, tlim=[5, 5.2],
     plt.close("all")
     plt.rcParams["font.family"] = "DejaVu Serif"
     fig = plt.figure(figsize=(13, 13), facecolor="white")
-    gs = fig.add_gridspec(len(fig_1_list) + 2, 4, height_ratios=[1.0, 1.0] + [1.] * n, hspace=0.38,
+    gs = fig.add_gridspec(len(fig_1_list) + 2, 4, height_ratios=[1.0, 1.0] + [1.] * n, hspace=0.42,
                           wspace=0.28, left=0.05, right=0.98,
                           top=0.96, bottom=0.04)
 
@@ -658,9 +801,9 @@ def plot_combined_single_cell_examples(fig_1_list, max_f=1800, tlim=[5, 5.2],
 
     for row, sim_params in enumerate(fig_1_list):
         ax_vm_psd = fig.add_subplot(gs[row + 1, :2], xlim=[1, max_f], xlabel="frequency [Hz]",
-                                    ylabel=r"PSD [$\mathrm{mV}^2/\mathrm{Hz}$]", ylim=[1e-5, 5e1])
+                                    ylabel=r"PSD [$\mathrm{mV}^2/\mathrm{Hz}$]", ylim=[1e-5, 1e1])
         ax_fr_psd = fig.add_subplot(gs[row + 1, 2:], xlim=[1, max_f], xlabel="frequency [Hz]",
-                                    ylabel=r"PSD [$\mathrm{spikes}^2/\mathrm{Hz}$]", ylim=[1e-0, 5e2])
+                                    ylabel=r"PSD [$\mathrm{spikes}^2/\mathrm{Hz}$]", ylim=[1e0, 1e2])
 
         results = run_single_cell_simulation(**sim_params)
 
@@ -682,13 +825,17 @@ def plot_combined_single_cell_examples(fig_1_list, max_f=1800, tlim=[5, 5.2],
             freqs_fr, fr_psd = return_freq_and_psd(t_bins, spike_rate)
             fr_psd = fr_psd[0]
         else:
-            freqs_fr, fr_psd = welch(spike_rate, fs=1000 / sim_params["resolution"], nperseg=len(spike_rate) // psd_segments,
+            freqs_fr, fr_psd = welch(spike_rate,
+                                     fs=1000 / sim_params["resolution"],
+                                     nperseg=len(spike_rate) // psd_segments,
                                       noverlap=(len(spike_rate) // psd_segments) // 2)
 
-        fr_SNR = compute_SNR(freqs_fr, fr_psd, stim_freq)
+        # fr_SNR = compute_SNR(freqs_fr, fr_psd, stim_freq)
+        fr_SNR_res = calculate_spectral_snr_and_zscore(freqs_fr, fr_psd, stim_freq, freq_window=5)
+        fr_SNR = fr_SNR_res['snr_peak_ratio']
+        fr_z_score = fr_SNR_res['z_score']
 
         if have_vm:
-            #
             fs = 1000 / sim_params["resolution"]
             if psd_segments is None:
                 freqs_vm, vm_psd = return_freq_and_psd(results["times"], results["Vm"])
@@ -696,8 +843,11 @@ def plot_combined_single_cell_examples(fig_1_list, max_f=1800, tlim=[5, 5.2],
             else:
                 freqs_vm, vm_psd = welch(results["Vm"], fs=fs, nperseg=len(results["Vm"]) // psd_segments,
                                           noverlap=(len(results["Vm"]) // psd_segments) // 2)
+            vm_SNR_res = calculate_spectral_snr_and_zscore(freqs_vm, vm_psd, stim_freq, freq_window=5)
+            vm_z_score = vm_SNR_res['z_score']
+            vm_SNR = vm_SNR_res['snr_peak_ratio']
 
-            vm_SNR = compute_SNR(freqs_vm, vm_psd, stim_freq)
+        ax_fr_psd.set_title(f"{sim_name} - PSD of fr: SNR at {stim_freq:.0f} Hz = {fr_SNR:.2f}; z-score = {fr_z_score:.2f}")
 
         # --- Titles: printed to stdout, NOT drawn on the figure ---------------
         vm_title = f"{sim_name} - Vm: firing rate {results['firing_rate']:.2f} Hz"
@@ -724,19 +874,19 @@ def plot_combined_single_cell_examples(fig_1_list, max_f=1800, tlim=[5, 5.2],
 
         # --- Bottom-left: Vm PSD ---------------------------------------------
         if have_vm:
-            mask = freqs_vm < max_f
+            mask = (freqs_vm >= 1) & (freqs_vm < max_f)
             ax_vm_psd.loglog(freqs_vm[mask], vm_psd[mask], color=color,
                              label=sim_name)
 
         # --- Bottom-right: firing-rate PSD -----------------------------------
-        mask = freqs_fr < max_f
+        mask = (freqs_fr >= 1) & (freqs_fr < max_f)
         ax_fr_psd.loglog(freqs_fr[mask], fr_psd[mask], color=color,
                          label=sim_name)
 
         # Remember the two carriers (from any two-carrier entry) for the inset.
         if len(f_values) == 2:
             carriers = sorted(float(f) for f in f_values)
-            fr_for_inset.append((freqs_fr, fr_psd, color))
+            fr_for_inset.append((freqs_fr[mask], fr_psd[mask], color))
 
         # --- Spectral-panel styling ----------------------------------------------
         for ax in (ax_vm_psd, ax_fr_psd):
@@ -818,14 +968,14 @@ def plot_combined_single_cell_examples(fig_1_list, max_f=1800, tlim=[5, 5.2],
 
     mark_subplots(fig.axes, xpos=-0.05, ypos=1.05)
 
-    fig.savefig(save_name, dpi=150)
+    fig.savefig(join(fig_folder, save_name), dpi=150)
     print(f"Saved figure to '{save_name}'")
     return fig
 
 
 def plot_compare_Vms(sim_list):
 
-    tlim = [5225, 5320]
+    tlim = [2000, 2200]
     fig = plt.figure(figsize=[12, 4])
     ax1 = fig.add_axes([0.07, 0.2, 0.9, 0.5], xlim=tlim, ylim=[-75, -50],
                           xlabel="time (ms)", ylabel=r"$V_{\rm m}$ (mV)")
@@ -847,130 +997,168 @@ def plot_compare_Vms(sim_list):
 
     ax1.legend(frameon=False, ncol=4, loc=(0.25,-.4))
     simplify_axes(ax1)
-    fig.savefig("vm_compare_dt:0.01.pdf")
+    fig.savefig(join("figures", "vm_compare.pdf"))
 
 
 if __name__ == "__main__":
 
-    dt = 0.05
-    force_rerun = True
-    welch_segments = 10
+    dt = 0.025
+    force_rerun = False
+    welch_segments = 8
+    # noise_type = "multisine"
+    noise_type = "gaussian"
+
+    carrier_f = 2000.
+    beat_f = 20.
 
     sim_params_1ABC = dict(
         sim_time=10000e3,
         target_stim_dVm=0.0,
-        f_values=[20],
+        f_values=[beat_f],
         noise_level_Vm=4.,
         seed=2,
         V_th=-50.,
         resolution=dt,
-        sim_name=f"Fig1A-C_dt:{dt}",
+        sim_name=f"Fig1A-C_dt:{dt}_{carrier_f}_{beat_f}_{noise_type}",
         force_rerun=force_rerun,
         description="only noise",
+        save_Vm="full",
+        noise_type = noise_type,
     )
 
     sim_params_S0 = dict(
-        sim_time=1000e3,
+        sim_time=1e3,
         target_stim_dVm=0.0,
-        f_values=[20],
+        f_values=[beat_f],
         noise_level_Vm=4.,
         seed=2,
         V_th=-00.,
         resolution=dt,
-        sim_name=f"FigS0_dt:{dt}",
+        sim_name=f"FigS0_dt:{dt}_{carrier_f}_{beat_f}_{noise_type}",
         force_rerun=force_rerun,
         description="only noise - high spike threshold",
+        save_Vm="full",
+        noise_type=noise_type,
     )
 
 
     sim_params_S1 = dict(
         sim_time=10e3,
         target_stim_dVm=0.3,
-        f_values=[20],
+        f_values=[beat_f],
         noise_level_Vm=0.,
         seed=2,
         V_th=-50.,
         resolution=dt,
-        sim_name=f"FigS1_dt:{dt}",
+        sim_name=f"FigS1_dt:{dt}_{carrier_f}_{beat_f}_{noise_type}",
         force_rerun=force_rerun,
-        description="only stimulation",
+        description="only beat stimulation",
+        save_Vm="full",
+        noise_type=noise_type,
     )
 
     sim_params_1DEF = dict(
         sim_time=10000e3,
         target_stim_dVm=0.3,
-        f_values=[20],
+        f_values=[beat_f],
         noise_level_Vm=4.,
         seed=2,
         V_th=-50.,
         resolution=dt,
-        sim_name=f"Fig1D-F_dt:{dt}",
+        sim_name=f"Fig1D-F_dt:{dt}_{carrier_f}_{beat_f}_{noise_type}",
         force_rerun=force_rerun,
         description="20 Hz stimulation",
+        save_Vm="full",
+        noise_type=noise_type,
     )
 
     sim_params_S2 = dict(
         sim_time=10e3,
         target_stim_dVm=0.3,
-        f_values=[1000],
+        f_values=[carrier_f],
         noise_level_Vm=0.,
         seed=2,
         V_th=-50.,
         resolution=dt,
-        sim_name=f"FigS2_dt:{dt}",
+        sim_name=f"FigS2_dt:{dt}_{carrier_f}_{beat_f}_{noise_type}",
+        description="carrier stimulation, no noise",
         force_rerun=force_rerun,
+        save_Vm="full",
+        noise_type=noise_type,
     )
 
     sim_params_1GHI = dict(
         sim_time=10000e3,
         target_stim_dVm=0.3,
-        f_values=[1000],
+        f_values=[carrier_f],
         noise_level_Vm=4.,
         seed=2,
         V_th=-50.,
         resolution=dt,
-        sim_name=f"Fig1G-I_dt:{dt}",
+        sim_name=f"Fig1G-I_dt:{dt}_{carrier_f}_{beat_f}_{noise_type}",
         force_rerun=force_rerun,
         description="1000 Hz stimulation",
+        save_Vm="full",
+        noise_type=noise_type,
     )
 
     sim_params_S3 = dict(
         sim_time=10e3,
         target_stim_dVm=0.3,
-        f_values=[1000, 1020],
+        f_values=[carrier_f, carrier_f + beat_f],
         noise_level_Vm=0.,
         seed=2,
         V_th=-50.,
         resolution=dt,
-        sim_name=f"FigS3b_dt:{dt}",
+        sim_name=f"FigS3b_dt:{dt}_{carrier_f}_{beat_f}_{noise_type}",
+        description="TI stimulation, no noise",
         force_rerun=force_rerun,
+        save_Vm="full",
+        noise_type=noise_type,
     )
 
     sim_params_1JKL = dict(
         sim_time=10000e3,
         target_stim_dVm=0.3,
-        f_values=[1000, 1020],
+        f_values=[carrier_f, carrier_f + beat_f],
         noise_level_Vm=4.,
         seed=2,
         V_th=-50.,
         resolution=dt,
-        sim_name=f"Fig1J-L_dt:{dt}",
+        sim_name=f"Fig1J-L_dt:{dt}_{carrier_f}_{beat_f}_{noise_type}",
         force_rerun=force_rerun,
         description="TI stimulation",
+        save_Vm="full",
+        noise_type=noise_type,
     )
 
     sim_params_list = [sim_params_S1, sim_params_S2, sim_params_S3]
     fig_1_list = [sim_params_1ABC, sim_params_1DEF, sim_params_1GHI, sim_params_1JKL]
 
-    for sim_params in [sim_params_1JKL]: #sim_params_list + fig_1_list:
-        results = run_single_cell_simulation(**sim_params)
-        plot_single_cell_results(results, sim_params, welch_segments=welch_segments, tlim=[5, 6])
-        # plot_single_cell_results(results, sim_params, tlim=[5, 5.01])
+    # for sim_params in sim_params_list + fig_1_list:
+    #     results = run_single_cell_simulation(**sim_params)
+    #     if sim_params["sim_name"].startswith("FigS2"):
+    #         tlim = [5, 5.01]
+    #     elif sim_params["sim_name"].startswith("FigS3b"):
+    #         tlim = [5, 5.05]
+    #     else:
+    #         tlim = [5, 6]
+    #
+    #     plot_single_cell_results(results, sim_params, use_welch=True,
+    #                              welch_segments=welch_segments, tlim=tlim)
 
-    # for psd_segments in [1, 2, 4, 6, 8, 10, 16]:
+
+    # for psd_segments in [1, 2, 4, 5, 6, 8, 10, 15, 16]:
     #     print("PSD segments: ", psd_segments, "")
-    #     plot_combined_single_cell_examples(fig_1_list, psd_segments=psd_segments, save_name=f"Fig1_combined_{psd_segments}psd_segments.png")
+    #     plot_combined_single_cell_examples(fig_1_list,
+    #                                        firing_rate_bin_size=dt,
+    #                                        psd_segments=psd_segments,
+    #                                        tlim=[2., 2.200],
+    #                                        save_name=f"Fig1_combined_{psd_segments}psd_segments.png")
+    plot_combined_single_cell_examples(fig_1_list,
+                                       psd_segments=8,
+                                       firing_rate_bin_size=dt,
+                                       tlim=[2.00, 2.2],
+                                       save_name=f"Fig1_combined_{10}psd_segments.pdf")
 
-    # plot_combined_single_cell_examples(fig_1_list, psd_segments=8, save_name=f"Fig1_combined_{8}psd_segments.pdf")
-
-    #plot_compare_Vms(fig_1_list)
+    # plot_compare_Vms(fig_1_list)

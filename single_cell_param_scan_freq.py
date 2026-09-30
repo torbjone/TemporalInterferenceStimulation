@@ -69,10 +69,10 @@ def run_param_scan(carrier_freqs, beat_freqs, const_params,
                               f_values=[carrier, carrier + beat],
                               sim_name=sim_name,
                               save_dir=save_dir,
-                              save_Vm=True)
+                              save_Vm="cut")
 
             results = run_single_cell_simulation(**sim_params)
-            plot_single_cell_results(results, sim_params)
+            plot_single_cell_results(results, sim_params, fig_folder="param_scan_freq_figs")
             # The analysis frequency is this grid point's beat frequency.
             power, snr, snr2 = analyze_firing_rate(
                 results, const_params["sim_time"], beat,
@@ -104,12 +104,12 @@ def plot_param_scan(firing_rate, fr_power, fr_SNR, fr_z_score,
     defaults to a log-spaced set if not given. The firing-rate and power panels
     use `n_levels` automatically-placed levels."""
     if snr_levels is None:
-        snr_levels = np.arange(26)[::5]
+        snr_levels = np.arange(20)[::2]
 
     #fr_levels = [3, 3.2, 3.6, 3.8, 4]
-    fr_levels = np.arange(160)[::30]
+    fr_levels = np.arange(110)[::10]
 
-    z_score_levels = np.arange(0, 20)[::2]
+    z_score_levels = np.arange(0, 100)[::10]
 
     snr_levels = np.asarray(snr_levels, dtype=float)
 
@@ -128,7 +128,7 @@ def plot_param_scan(firing_rate, fr_power, fr_SNR, fr_z_score,
     ]
 
     fig, axes = plt.subplots(1, 4, figsize=(16, 4.8))
-    fig.subplots_adjust(wspace=0.35, left=0.06, right=0.97, bottom=0.15, top=0.9)
+    fig.subplots_adjust(wspace=0.4, left=0.04, right=0.98, bottom=0.13, top=0.93)
 
     for ax, (matrix, title, levels, log_scale, label) in zip(axes, panels):
         Z = matrix.T
@@ -149,7 +149,7 @@ def plot_param_scan(firing_rate, fr_power, fr_SNR, fr_z_score,
 
         ax.set_title(title)
         ax.set_xlabel("carrier frequency (Hz)")
-        ax.set_ylabel("beat frequency (Hz)")
+        ax.set_ylabel("beat frequency (Hz)", labelpad=-5)
         #fig.colorbar(cf, ax=ax, fraction=0.046, pad=0.04)
 
         if log_scale:
@@ -164,7 +164,7 @@ def plot_param_scan(firing_rate, fr_power, fr_SNR, fr_z_score,
         ax.plot(1000, 20, '*', c='orange', ms=8)
 
     simplify_axes(list(axes))
-    mark_subplots(list(axes), ypos=1.05)
+    mark_subplots(list(axes), "EFGH", ypos=1.05)
     fig.savefig(save_name, dpi=150)
     print(f"\nSaved figure to '{save_name}'")
     return fig
@@ -173,7 +173,7 @@ def plot_param_scan(firing_rate, fr_power, fr_SNR, fr_z_score,
 if __name__ == "__main__":
     # Stimulation strength and noise level are held constant; the carrier and
     # beat frequencies are scanned instead.
-    dt = 0.1#0.05
+    dt = 0.05
     const_params = dict(
         sim_time=10000e3,
         target_stim_dVm=0.3,
@@ -191,7 +191,7 @@ if __name__ == "__main__":
     carrier_freqs = np.linspace(500, 3000, 11)   # Hz
     beat_freqs = np.linspace(10, 100, 10)         # Hz
 
-    rerun_scan = True
+    rerun_scan = False
 
     if rerun_scan:
         firing_rate, fr_power, fr_SNR, fr_z_score = run_param_scan(

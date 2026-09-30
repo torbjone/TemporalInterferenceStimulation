@@ -34,12 +34,14 @@ import pickle
 
 import numpy as np
 import matplotlib.pyplot as plt
+from scipy.signal import welch
 
 from single_cell_simulations import (
     find_I,
     find_noise_std,
     find_spike_rate,
     return_freq_and_psd,
+    calculate_spectral_snr_and_zscore,
     compute_SNR,
     simplify_axes,
 )
@@ -77,7 +79,7 @@ def run_network_simulation(pop_size=100,
                            tau_m=10,
                            n_record_E=5,
                            n_record_I=5,
-                           pop_rate_bin_size=1.0,
+                           pop_rate_bin_size=0.1,
                            n_threads=1,
                            seed=2,
                            resolution=0.1,
@@ -424,7 +426,7 @@ def run_network_simulation(pop_size=100,
 
 
 def plot_network_results(results, sim_params, tlim=[5, 6], max_f=2000,
-                         firing_rate_bin_size=0.1):
+                         firing_rate_bin_size=None, use_welch=True, welch_segments=10):
     """Plot the E/I network output.
 
     Time-domain panels: neuron B's Vm with spikes, the recorded subsets of E
@@ -445,6 +447,9 @@ def plot_network_results(results, sim_params, tlim=[5, 6], max_f=2000,
     V_th = sim_params["V_th"]
     sim_name = sim_params["sim_name"]
     sim_time = sim_params["sim_time"]
+
+    if firing_rate_bin_size is None:
+        firing_rate_bin_size = sim_params["resolution"]
 
     # Stimulus/beat frequency at which the SNR is evaluated: the difference
     # frequency for a two-carrier (TI) drive, or the single carrier otherwise.
@@ -477,30 +482,66 @@ def plot_network_results(results, sim_params, tlim=[5, 6], max_f=2000,
     net_drive = w_E * E["population_rate"] + w_I * I["population_rate"]
     net_times = E["population_rate_times"] if E["population_rate_times"].size \
         else I["population_rate_times"]
-    freqs_net, psd_net = return_freq_and_psd(net_times, net_drive)
-    freqs_net_E, psd_net_E = return_freq_and_psd(net_times, pop_rate_E)
-    freqs_net_I, psd_net_I = return_freq_and_psd(net_times, pop_rate_I)
-
-    psd_net = psd_net[0]
-    psd_net_E = psd_net_E[0]
-    psd_net_I = psd_net_I[0]
-
-    snr_net = compute_SNR(freqs_net, psd_net, stim_freq)
-    snr_net_E = compute_SNR(freqs_net_E, psd_net_E, stim_freq)
-    snr_net_I = compute_SNR(freqs_net_I, psd_net_I, stim_freq)
 
     # Neuron B firing rate (bin the B spike train, then take its PSD).
     b_rate, b_bins = find_spike_rate(B["spike_times"], firing_rate_bin_size, sim_time)
-    freqs_Bfr, psd_Bfr = return_freq_and_psd(b_bins, b_rate)
-    psd_Bfr = psd_Bfr[0]
-    snr_Bfr = compute_SNR(freqs_Bfr, psd_Bfr, stim_freq)
+
+    if use_welch:
+        fs_fr = 1000. / firing_rate_bin_size
+        print(firing_rate_bin_size)
+        freqs_net, psd_net = welch(net_drive, fs=fs_fr, nperseg=len(net_drive) // welch_segments,
+                                  noverlap=(len(net_drive) // welch_segments) // 2)
+        freqs_net_E, psd_net_E = welch(pop_rate_E, fs=fs_fr, nperseg=len(pop_rate_E) // welch_segments,
+                                  noverlap=(len(pop_rate_E) // welch_segments) // 2)
+        freqs_net_I, psd_net_I = welch(pop_rate_I, fs=fs_fr, nperseg=len(pop_rate_I) // welch_segments,
+                                  noverlap=(len(pop_rate_I) // welch_segments) // 2)
+        freqs_Bfr, psd_Bfr = welch(b_rate, fs=fs_fr, nperseg=len(b_rate) // welch_segments,
+                                   noverlap=(len(b_rate) // welch_segments) // 2)
+
+    else:
+        freqs_net, psd_net = return_freq_and_psd(net_times, net_drive)
+        freqs_net_E, psd_net_E = return_freq_and_psd(net_times, pop_rate_E)
+        freqs_net_I, psd_net_I = return_freq_and_psd(net_times, pop_rate_I)
+        freqs_Bfr, psd_Bfr = return_freq_and_psd(b_bins, b_rate)
+        psd_net = psd_net[0]
+        psd_net_E = psd_net_E[0]
+        psd_net_I = psd_net_I[0]
+        psd_Bfr = psd_Bfr[0]
+
+    # snr_net_old = compute_SNR(freqs_net, psd_net, stim_freq)
+    snr_net_E_old = compute_SNR(freqs_net_E, psd_net_E, stim_freq)
+    # snr_net_I_old = compute_SNR(freqs_net_I, psd_net_I, stim_freq)
+    snr_Bfr_old = compute_SNR(freqs_Bfr, psd_Bfr, stim_freq)
+
+    # snr_net = calculate_spectral_snr_and_zscore(freqs_net, psd_net, stim_freq, freq_window=5)
+    snr_net_E_res = calculate_spectral_snr_and_zscore(freqs_net_E, psd_net_E, stim_freq, freq_window=5)
+    # snr_net_I = calculate_spectral_snr_and_zscore(freqs_net_I, psd_net_I, stim_freq, freq_window=5)
+    snr_Bfr_res = calculate_spectral_snr_and_zscore(freqs_Bfr, psd_Bfr, stim_freq, freq_window=5)
+
+
+    print("Old SNR: ", snr_Bfr_old)
+    print("New calc: ", snr_Bfr_res)
+
+    snr_net_E = snr_net_E_res['snr_peak_ratio']
+    snr_Bfr = snr_Bfr_res['snr_peak_ratio']
 
     # Neuron B membrane potential (only available when Vm was saved).
     have_B_vm = "Vm" in B
     if have_B_vm:
-        freqs_Bvm, psd_Bvm = return_freq_and_psd(B["times"], B["Vm"])
-        psd_Bvm = psd_Bvm[0]
-        snr_Bvm = compute_SNR(freqs_Bvm, psd_Bvm, stim_freq)
+        if use_welch:
+            fs_Vm = 1000. / np.median(np.diff(B["times"]))
+            freqs_Bvm, psd_Bvm = welch(B["Vm"], fs=fs_Vm, nperseg=len(B["Vm"]) // welch_segments,
+                                       noverlap=(len(B["Vm"]) // welch_segments) // 2)
+        else:
+            freqs_Bvm, psd_Bvm = return_freq_and_psd(B["times"], B["Vm"])
+            psd_Bvm = psd_Bvm[0]
+
+        snr_Bvm_old = compute_SNR(freqs_Bvm, psd_Bvm, stim_freq)
+        snr_Bvm_res = calculate_spectral_snr_and_zscore(freqs_Bvm, psd_Bvm, stim_freq, freq_window=5)
+
+        print("Old SNR: ", snr_Bvm_old)
+        print("New calc: ", snr_Bvm_res)
+        snr_Bvm = snr_Bvm_res['snr_peak_ratio']
 
     plt.close("all")
     fig = plt.figure(figsize=(13, 15))
@@ -615,17 +656,19 @@ def plot_network_results(results, sim_params, tlim=[5, 6], max_f=2000,
 
 if __name__ == "__main__":
 
-    weight_factor = 4.5
+    weight_factor = 4.3
     target_stim_dVm = 0.3
-    dt = 0.05
+    dt = 0.025
+    carrier_f = 2000
+    beat_f = 20
 
     sim_params = dict(
         pop_size=10000,
         exc_fraction=0.8,
         inh_weight_factor=4.0,
         sim_time=1000e3,
-        f_values=[1000, 1020],
-        target_stim_dVm=0.3,
+        f_values=[carrier_f, carrier_f + beat_f],
+        target_stim_dVm=target_stim_dVm,
         noise_level_Vm=4.0,
         noise_level_Vm_B=0.0,
         syn_weight=weight_factor,
@@ -642,8 +685,8 @@ if __name__ == "__main__":
         seed=2,
         resolution=dt,
         n_threads=4,
-        sim_name=f"network_ei_test_{target_stim_dVm}_{weight_factor}",
-        force_rerun=True,
+        sim_name=f"network_ei_test_{target_stim_dVm}_{weight_factor}_{carrier_f}_{beat_f}",
+        force_rerun=False,
         save_Vm=True,
     )
 

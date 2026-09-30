@@ -85,10 +85,10 @@ def run_param_scan(target_stim_dVms, noise_level_Vms, const_params,
                               noise_level_Vm=noise,
                               sim_name=sim_name,
                               save_dir=save_dir,
-                              save_Vm=True)
+                              save_Vm="cut")
 
             results = run_single_cell_simulation(**sim_params)
-            plot_single_cell_results(results, sim_params)
+            plot_single_cell_results(results, sim_params, fig_folder="param_scan_figs")
             power, snr, snr2 = analyze_firing_rate(
                 results, const_params["sim_time"], analysis_freq,
                 bin_size=firing_rate_bin_size,  use_welch=use_welch, welch_segments=welch_segments)
@@ -122,7 +122,8 @@ def plot_param_scan(firing_rate, fr_power, fr_SNR, fr_z_score,
 
     fr_levels = [25, 50, 100, 200, 400, 800, 1600, 3200]
     snr_levels = np.asarray(snr_levels, dtype=float)
-    z_score_levels = np.arange(0, 20)[::2]
+    z_score_levels = np.logspace(0., 3, 10)
+    print(f"z_score_levels: {z_score_levels}")
 
 
     # Grid of data coordinates: x = noise level, y = target stim dVm. Each
@@ -135,12 +136,12 @@ def plot_param_scan(firing_rate, fr_power, fr_SNR, fr_z_score,
         (firing_rate, "Firing rate (Hz)", n_levels, False, "Hz"),
         (fr_power, f"Firing-rate power at {analysis_freq:.0f} Hz", fr_levels, True, "|firing rate|²/Hz"),
         (fr_SNR, f"Firing-rate SNR at {analysis_freq:.0f} Hz", snr_levels, True, ''),
-        (fr_z_score, "z-score for peak at beat frequency", z_score_levels, False, ''),
+        (fr_z_score, "z-score for peak at beat frequency", z_score_levels,True, ''),
 
     ]
 
-    fig, axes = plt.subplots(1, 3, figsize=(16, 4.8))
-    fig.subplots_adjust(wspace=0.35, left=0.06, right=0.97, bottom=0.15, top=0.9)
+    fig, axes = plt.subplots(1, 4, figsize=(16, 4.8))
+    fig.subplots_adjust(wspace=0.4, left=0.04, right=0.98, bottom=0.13, top=0.93)
 
     for ax, (matrix, title, levels, log_scale, label) in zip(axes, panels):
         Z = matrix.T
@@ -148,10 +149,10 @@ def plot_param_scan(firing_rate, fr_power, fr_SNR, fr_z_score,
             # Match the colour normalisation to the manual level range; extend
             # both ends so out-of-range cells still get the end colours.
             norm = LogNorm(vmin=levels[0], vmax=levels[-1])
-            cf = ax.contourf(X, Y, Z, levels=levels, norm=norm, cmap="PuBuGn_r",
+            cf = ax.contourf(X, Y, np.abs(Z), levels=levels, norm=norm, cmap="PuBuGn_r",
                              extend="both")
             # Overlay labelled contour lines for readability.
-            cl = ax.contour(X, Y, Z, levels=levels, colors="k", linewidths=0.4)
+            cl = ax.contour(X, Y, np.abs(Z), levels=levels, colors="k", linewidths=0.4, extend="both")
             ax.clabel(cl, fmt="%g", fontsize=10)
         else:
             cf = ax.contourf(X, Y, Z, levels=levels, cmap="PuBuGn_r")
@@ -161,7 +162,7 @@ def plot_param_scan(firing_rate, fr_power, fr_SNR, fr_z_score,
 
         ax.set_title(title)
         ax.set_xlabel("noise level Vm (mV)")
-        ax.set_ylabel("target stim dVm (mV)")
+        ax.set_ylabel("target stim dVm (mV)", labelpad=-2)
         if log_scale:
            cbar = fig.colorbar(cf, ax=ax, fraction=0.046, pad=0.04)
            cbar.set_ticks(levels)
@@ -169,7 +170,7 @@ def plot_param_scan(firing_rate, fr_power, fr_SNR, fr_z_score,
 
         else:
            cbar = fig.colorbar(cf, ax=ax, fraction=0.046, pad=0.04, label="")
-        cbar.set_label(label)
+        cbar.set_label(label, labelpad=-1)
         ax.plot(4, 0.3, '*', c='orange', ms=8)
 
     simplify_axes(list(axes))
@@ -203,7 +204,7 @@ if __name__ == "__main__":
     target_stim_dVms = np.linspace(0, 1, 11)   # mV
     noise_level_Vms = np.linspace(3, 9, 13)    # mV
 
-    rerun_scan = True
+    rerun_scan = False
     welch_segments = 10
     use_welch = True
 
