@@ -411,8 +411,8 @@ def run_RT_based_simulation(cell_name, dt, tstop, cutoff, input_idx,
 
     eeg = lead_field * p[2, :] * 1E-9
 
-    # 1 nA / Hz intracellular stim to 5 mA / Hz TES. Gives Vm response to TES in mV / Hz
-    vm_response_RT = eeg * 5e6
+    # 1 nA / Hz intracellular stim to 1 mA / Hz TES. Gives Vm response to TES in mV / Hz
+    vm_response_RT = eeg * 1e6
 
     # EEG to nV
     eeg *= 1e6
@@ -436,6 +436,7 @@ def run_RT_based_simulation(cell_name, dt, tstop, cutoff, input_idx,
     freqs, yf3 = return_freq_and_amplitude(cell.tvec, eeg)
     freqs, vm_response_RT_PSD = return_freq_and_amplitude(cell.tvec, vm_response_RT)
 
+    np.save("human_PC_1mA_TES_response.npy", [freqs, vm_response_RT_PSD[0]])
 
     fig = plt.figure(figsize=(12, 5))
     fig.subplots_adjust(wspace=0.6, right=0.98, top=0.90, hspace=0.4, left=0.07, bottom=0.1)
