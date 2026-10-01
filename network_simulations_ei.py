@@ -657,7 +657,7 @@ def plot_network_results(results, sim_params, tlim=[5, 6], max_f=2000,
 if __name__ == "__main__":
 
     weight_factor = 4.3
-    target_stim_dVm = 0.3
+    target_stim_dVm = 0.1
     dt = 0.025
     carrier_f = 2000
     beat_f = 20
