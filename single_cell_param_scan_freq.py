@@ -173,7 +173,7 @@ def plot_param_scan(firing_rate, fr_power, fr_SNR, fr_z_score,
 if __name__ == "__main__":
     # Stimulation strength and noise level are held constant; the carrier and
     # beat frequencies are scanned instead.
-    dt = 0.05
+    dt = 0.025
     const_params = dict(
         sim_time=10000e3,
         target_stim_dVm=0.3,

@@ -492,8 +492,6 @@ def run_single_cell_simulation(sim_time=10e3,
                 "amplitude_values": list(amp_values),
             }
         )
-
-
     else:
         raise ValueError(f"Unknown noise_type '{noise_type}'. Must be 'gaussian' or 'multisine'.")
 
@@ -1132,20 +1130,35 @@ if __name__ == "__main__":
         noise_type=noise_type,
     )
 
+    sim_params_weak = dict(
+        sim_time=10000e3,
+        target_stim_dVm=0.1,
+        f_values=[carrier_f, carrier_f + beat_f],
+        noise_level_Vm=4.,
+        seed=2,
+        V_th=-50.,
+        resolution=dt,
+        sim_name=f"Fig_weak-L_dt:{dt}_{carrier_f}_{beat_f}_{noise_type}_0.1",
+        force_rerun=force_rerun,
+        description="TI stimulation",
+        save_Vm="full",
+        noise_type=noise_type,
+    )
+
     sim_params_list = [sim_params_S1, sim_params_S2, sim_params_S3]
     fig_1_list = [sim_params_1ABC, sim_params_1DEF, sim_params_1GHI, sim_params_1JKL]
 
-    # for sim_params in sim_params_list + fig_1_list:
-    #     results = run_single_cell_simulation(**sim_params)
-    #     if sim_params["sim_name"].startswith("FigS2"):
-    #         tlim = [5, 5.01]
-    #     elif sim_params["sim_name"].startswith("FigS3b"):
-    #         tlim = [5, 5.05]
-    #     else:
-    #         tlim = [5, 6]
-    #
-    #     plot_single_cell_results(results, sim_params, use_welch=True,
-    #                              welch_segments=welch_segments, tlim=tlim)
+    for sim_params in [sim_params_weak]:#sim_params_list + fig_1_list:
+        results = run_single_cell_simulation(**sim_params)
+        if sim_params["sim_name"].startswith("FigS2"):
+            tlim = [5, 5.01]
+        elif sim_params["sim_name"].startswith("FigS3b"):
+            tlim = [5, 5.05]
+        else:
+            tlim = [5, 6]
+
+        plot_single_cell_results(results, sim_params, use_welch=True,
+                                 welch_segments=welch_segments, tlim=tlim)
 
 
     # for psd_segments in [1, 2, 4, 5, 6, 8, 10, 15, 16]:
@@ -1155,10 +1168,10 @@ if __name__ == "__main__":
     #                                        psd_segments=psd_segments,
     #                                        tlim=[2., 2.200],
     #                                        save_name=f"Fig1_combined_{psd_segments}psd_segments.png")
-    plot_combined_single_cell_examples(fig_1_list,
-                                       psd_segments=8,
-                                       firing_rate_bin_size=dt,
-                                       tlim=[2.00, 2.2],
-                                       save_name=f"Fig1_combined_{10}psd_segments.pdf")
+    # plot_combined_single_cell_examples(fig_1_list,
+    #                                    psd_segments=8,
+    #                                    firing_rate_bin_size=dt,
+    #                                    tlim=[2.00, 2.2],
+    #                                    save_name=f"Fig1_combined_{10}psd_segments.pdf")
 
     # plot_compare_Vms(fig_1_list)

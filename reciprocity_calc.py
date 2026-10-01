@@ -436,7 +436,7 @@ def run_RT_based_simulation(cell_name, dt, tstop, cutoff, input_idx,
     freqs, yf3 = return_freq_and_amplitude(cell.tvec, eeg)
     freqs, vm_response_RT_PSD = return_freq_and_amplitude(cell.tvec, vm_response_RT)
 
-    np.save("human_PC_1mA_TES_response.npy", [freqs, vm_response_RT_PSD[0]])
+    np.save(join("results", "human_PC_1mA_TES_response.npy"), [freqs, vm_response_RT_PSD[0]])
 
     fig = plt.figure(figsize=(12, 5))
     fig.subplots_adjust(wspace=0.6, right=0.98, top=0.90, hspace=0.4, left=0.07, bottom=0.1)
@@ -492,8 +492,9 @@ def run_RT_based_simulation(cell_name, dt, tstop, cutoff, input_idx,
     mark_subplots(ax_neur, "A", ypos=1, xpos=0.1)
     mark_subplots(fig.axes)
     simplify_axes(fig.axes)
-    fig.savefig(f"control_RT_sim_{cell_name}.png")
-    fig.savefig(f"control_RT_sim_{cell_name}.pdf")
+    os.makedirs("figures", exist_ok=True)
+    fig.savefig(join("figures", f"control_RT_sim_{cell_name}.png"))
+    fig.savefig(join("figures", f"control_RT_sim_{cell_name}.pdf"))
     plt.close(fig)
 
     plt.show()

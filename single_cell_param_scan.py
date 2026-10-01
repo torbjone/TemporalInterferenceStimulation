@@ -184,8 +184,8 @@ if __name__ == "__main__":
     # Two carriers 20 Hz apart -> the firing-rate envelope beats at 20 Hz,
     # which is the frequency at which power/SNR are evaluated.
     analysis_freq = 20.0
-    carrier_freq = 1000.0
-    dt = 0.05
+    carrier_freq = 2000.0
+    dt = 0.025
 
     # Parameters held constant across the scan.
     const_params = dict(
@@ -204,8 +204,8 @@ if __name__ == "__main__":
     target_stim_dVms = np.linspace(0, 1, 11)   # mV
     noise_level_Vms = np.linspace(3, 9, 13)    # mV
 
-    rerun_scan = False
-    welch_segments = 10
+    rerun_scan = True
+    welch_segments = 8
     use_welch = True
 
     if rerun_scan:
