@@ -1132,13 +1132,13 @@ if __name__ == "__main__":
 
     sim_params_weak = dict(
         sim_time=10000e3,
-        target_stim_dVm=0.1,
+        target_stim_dVm=0.2,
         f_values=[carrier_f, carrier_f + beat_f],
         noise_level_Vm=4.,
         seed=2,
         V_th=-50.,
         resolution=dt,
-        sim_name=f"Fig_weak-L_dt:{dt}_{carrier_f}_{beat_f}_{noise_type}_0.1",
+        sim_name=f"Fig_weak-L_dt:{dt}_{carrier_f}_{beat_f}_{noise_type}_0.2",
         force_rerun=force_rerun,
         description="TI stimulation",
         save_Vm="full",
