@@ -25,15 +25,16 @@ Results are cached to a pickle file exactly as in run_single_cell_simulation.
 
 import os
 import pickle
-
+from os.path import join
 import numpy as np
 import matplotlib.pyplot as plt
+from scipy.signal import welch
 
 from single_cell_simulations import (
     find_noise_std,
     find_spike_rate,
     return_freq_and_psd,
-    compute_SNR,
+    calculate_spectral_snr_and_zscore,
     simplify_axes,
 )
 
@@ -250,15 +251,20 @@ def run_synaptic_input_simulation(sim_time=10e3,
     return results
 
 
-def plot_synaptic_input_results(results, sim_params, tlim=[0.5, 1.0], max_f=2000,
-                                firing_rate_bin_size=0.1, input_bin_size=0.1):
+def plot_synaptic_input_results(results, sim_params,
+                                tlim=[0.5, 1.0], max_f=3200,
+                                firing_rate_bin_size=0.1, input_bin_size=0.1,
+                                welch_segments=8):
     """Plot the membrane-potential trace and the PSDs of the membrane
     potential, the firing rate, and the synaptic input rate.
 
     Each spectrum is shown full-band (log-log) and zoomed around `input_freq`,
-    annotated with its SNR there. `tlim` is the time window (s) shown for the
-    Vm trace; `max_f` the upper frequency (Hz) of the full spectra. The Vm
-    panels require the simulation to have been run with save_Vm=True."""
+    annotated with its SNR and z-score there. `tlim` is the time window (s)
+    shown for the Vm trace; `max_f` the upper frequency (Hz) of the full
+    spectra. PSDs are computed with Welch's method using `welch_segments`
+    segments (50% overlap); set `welch_segments=None` to use a single
+    full-length FFT instead. The Vm panels require the simulation to have been
+    run with save_Vm=True."""
     V_th = sim_params["V_th"]
     sim_name = sim_params["sim_name"]
     sim_time = sim_params["sim_time"]
@@ -268,23 +274,32 @@ def plot_synaptic_input_results(results, sim_params, tlim=[0.5, 1.0], max_f=2000
     have_vm = "Vm" in results
 
     # --- Spectra --------------------------------------------------------------
+    def _psd(sig, dt_ms):
+        """PSD of `sig` sampled every `dt_ms` ms (Welch, or a single FFT if
+        welch_segments is None)."""
+        if welch_segments is None:
+            freqs, psd = return_freq_and_psd(dt_ms, sig)
+            return freqs, psd[0]
+        nperseg = len(sig) // welch_segments
+        return welch(sig, fs=1000. / dt_ms, nperseg=nperseg, noverlap=nperseg // 2)
+
+    def _snr(freqs, psd):
+        return calculate_spectral_snr_and_zscore(freqs, psd, input_freq, freq_window=5)
+
     # Neuron firing rate.
-    spike_rate, t_bins = find_spike_rate(results["spike_times"], firing_rate_bin_size, sim_time)
-    freqs_fr, psd_fr = return_freq_and_psd(t_bins, spike_rate)
-    psd_fr = psd_fr[0]
-    snr_fr = compute_SNR(freqs_fr, psd_fr, input_freq)
+    spike_rate, _ = find_spike_rate(results["spike_times"], firing_rate_bin_size, sim_time)
+    freqs_fr, psd_fr = _psd(spike_rate, firing_rate_bin_size)
+    snr_fr = _snr(freqs_fr, psd_fr)
 
     # Synaptic input rate (pooled parrot spikes -> rate -> PSD).
-    in_rate, in_bins = find_spike_rate(results["input_spike_times"], input_bin_size, sim_time)
-    freqs_in, psd_in = return_freq_and_psd(in_bins, in_rate)
-    psd_in = psd_in[0]
-    snr_in = compute_SNR(freqs_in, psd_in, input_freq)
+    in_rate, _ = find_spike_rate(results["input_spike_times"], input_bin_size, sim_time)
+    freqs_in, psd_in = _psd(in_rate, input_bin_size)
+    snr_in = _snr(freqs_in, psd_in)
 
     # Membrane potential.
     if have_vm:
-        freqs_vm, psd_vm = return_freq_and_psd(results["times"], results["Vm"])
-        psd_vm = psd_vm[0]
-        snr_vm = compute_SNR(freqs_vm, psd_vm, input_freq)
+        freqs_vm, psd_vm = _psd(results["Vm"], resolution)
+        snr_vm = _snr(freqs_vm, psd_vm)
 
     plt.close("all")
     fig = plt.figure(figsize=(13, 10))
@@ -309,7 +324,8 @@ def plot_synaptic_input_results(results, sim_params, tlim=[0.5, 1.0], max_f=2000
 
         ax_full = fig.add_subplot(gs[1, col], xlim=[1, max_f],
                                   xlabel="frequency (Hz)", ylabel=ylabel,
-                                  title=f"{title}\nSNR = {snr:.2f}")
+                                  title=(f"{title}\nSNR = {snr['snr_peak_ratio']:.2f}; "
+                                         f"z-score = {snr['z_score']:.2f}"))
         ax_full.axvline(x=input_freq, lw=0.5, ls='--', color='gray')
         ax_full.loglog(freqs[mask], psd[mask], 'k')
 
@@ -334,33 +350,35 @@ def plot_synaptic_input_results(results, sim_params, tlim=[0.5, 1.0], max_f=2000
               "Synaptic input rate", 1.2)
 
     simplify_axes(fig.axes)
-    out_name = f"{sim_name}_{int(sim_time / 1000)}s.png"
+    out_name = join("figures", f"{sim_name}_{int(sim_time / 1000)}s.png")
     plt.savefig(out_name, dpi=150)
     print(f"Saved figure to '{out_name}'")
     return fig
 
 
 if __name__ == "__main__":
+
+    dt = 0.025
     sim_params = dict(
         sim_time=100e3,
-        input_freq=1000.0,
+        input_freq=2000.0,
         input_rate=10.0,
-        input_ampl=10.0,
-        n_inputs=100,
-        syn_weight=15.0,
+        input_ampl=1.0,
+        n_inputs=50,
+        syn_weight=22.0,
         syn_delay=1.5,
-        tau_syn=2,
-        noise_level_Vm=0.5,
+        tau_syn=0.1,
+        noise_level_Vm=0.0,
         C=100,
-        V_th=-10.,
+        V_th=-40.,
         E_m=-60.,
         tau_m=10,
         seed=2,
-        resolution=0.1,
+        resolution=dt,
         sim_name="synaptic_demo_no_spikes_noise2",
         force_rerun=False,
         save_Vm=True,
     )
 
     results = run_synaptic_input_simulation(**sim_params)
-    plot_synaptic_input_results(results, sim_params)
+    plot_synaptic_input_results(results, sim_params, firing_rate_bin_size=dt)
