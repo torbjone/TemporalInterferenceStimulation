@@ -50,6 +50,39 @@ def find_noise_std(noise_level_Vm, tau_m=10., C_m=100., resolution=0.1):
     return sigma_I / 1e-12         # A -> pA
 
 
+def find_syn_noise_weight(noise_level_Vm, n_ex, rate, ei_ratio=4, g=4.,
+                          tau_syn=2., tau_m=10., C_m=100., resolution=0.1):
+    """Excitatory synaptic weight (pA, alpha-PSC peak) that makes balanced
+    Poisson synaptic input drive a membrane-potential standard deviation of
+    `noise_level_Vm` mV in the subthreshold iaf_psc_alpha neuron.
+
+    The neuron receives `n_ex` excitatory inputs of weight w and
+    n_in = n_ex / `ei_ratio` inhibitory inputs of weight -g*w, each an
+    independent Poisson train of `rate` (spikes/s). With ei_ratio == g the mean
+    input current cancels. By Campbell's theorem the Vm variance of this shot
+    noise is
+        sigma_V^2 = rate * (n_ex + n_in * g^2) * w^2 * int k(t)^2 dt,
+    where k(t) is the PSP (mV) evoked by a unit-peak (1 pA) alpha current:
+        k(t) = e/(tau_syn*C_m) * exp(-t/tau_m) * (1 - exp(-b*t)*(1 + b*t)) / b^2,
+    with b = 1/tau_syn - 1/tau_m. Spikes are delivered on the simulation grid
+    with Poisson counts per step, so the integral is evaluated as the sum over
+    grid points times `resolution`. For a sinusoidally modulated rate the
+    same holds on average, with `rate` the mean rate. `tau_syn`, `tau_m`,
+    `resolution` in ms and `C_m` in pF, to match the simulation parameters."""
+    if noise_level_Vm == 0.0:
+        return 0.0
+    n_in = n_ex / ei_ratio
+    t = np.arange(0, 20 * max(tau_m, tau_syn), resolution)  # ms
+    b = 1. / tau_syn - 1. / tau_m
+    if abs(b) < 1e-9:
+        k = np.e / (tau_syn * C_m) * t**2 / 2 * np.exp(-t / tau_m)
+    else:
+        k = (np.e / (tau_syn * C_m) * np.exp(-t / tau_m)
+             * (1 - np.exp(-b * t) * (1 + b * t)) / b**2)
+    int_k2 = np.sum(k**2) * resolution * 1e-3  # mV^2 s per pA^2
+    return noise_level_Vm / np.sqrt(rate * (n_ex + n_in * g**2) * int_k2)
+
+
 def find_multisine_noise_amp(noise_level_Vm, freqs, tau_m=10., C_m=100.):
     """Per-frequency sinusoidal current amplitude (pA) for multisine noise
     distributed across `freqs` (Hz) that produces a membrane-potential
@@ -360,6 +393,8 @@ def run_single_cell_simulation(sim_time=10e3,
                                f_values=[10.0], target_stim_dVm=0.3,
                                noise_level_Vm=4.0,
                                noise_type="gaussian", noise_freqs=None,
+                               syn_n_ex=800, syn_rate=10., syn_ampl=0.,
+                               syn_freq=20., tau_syn=2.,
                                C=100,
                                V_th=-50.0, E_m=-60.0, tau_m=10,
                                seed=2, resolution=0.1, sim_name="test",
@@ -367,7 +402,8 @@ def run_single_cell_simulation(sim_time=10e3,
                                save_Vm="cut", description=""):
     """This function creates:
     -Single iaf_psc_alpha neuron (LIF w/alpha-shaped postsynaptic currents)
-    -noise using a noise_generator (Gaussian distribution) or step_current_generator (multisine)
+    -noise using a noise_generator (Gaussian distribution), step_current_generator (multisine)
+     or balanced excitatory/inhibitory Poisson synaptic input (syn_noise)
     -spike_recorder to get the spike times
     -multimeter to plot the membrane potential manually
     -deterministic sinusoidal inputs using AC_generators
@@ -381,7 +417,16 @@ def run_single_cell_simulation(sim_time=10e3,
     -V_th : threshold potential
     -sim_time: Simulation time
     -times : times when Vm was recorded
-    -noise_type: Type of noise applied ("gaussian" or "multisine")
+    -noise_type: Type of noise applied ("gaussian", "multisine" or "syn_noise")
+
+    For noise_type="syn_noise" the neuron receives `syn_n_ex` excitatory and
+    syn_n_ex/4 inhibitory inputs (parrot_neurons relaying independent
+    realisations of one sinusoidal_poisson_generator with mean rate
+    `syn_rate`, modulation amplitude `syn_ampl` (spikes/s) and frequency
+    `syn_freq` (Hz)). Inhibitory weights are 4 times stronger, so the mean
+    input cancels, and the excitatory weight is set (find_syn_noise_weight)
+    so that the input drives a `noise_level_Vm` mV Vm standard deviation.
+    `tau_syn` (ms) is the alpha-PSC time constant of both synapse types.
 
     The results are saved to a pickle file (together with all input
     parameters) inside ``save_dir``. On subsequent calls the function will
@@ -407,6 +452,15 @@ def run_single_cell_simulation(sim_time=10e3,
         "resolution": resolution,
         "sim_name": sim_name,
     }
+    if noise_type == "syn_noise":
+        # Only added for syn_noise so existing cache files remain valid.
+        params.update({
+            "syn_n_ex": syn_n_ex,
+            "syn_rate": syn_rate,
+            "syn_ampl": syn_ampl,
+            "syn_freq": syn_freq,
+            "tau_syn": tau_syn,
+        })
 
     save_path = os.path.join(save_dir, f"{sim_name}.pkl")
 
@@ -492,8 +546,36 @@ def run_single_cell_simulation(sim_time=10e3,
                 "amplitude_values": list(amp_values),
             }
         )
+    elif noise_type == "syn_noise":
+        # Balanced synaptic noise: 4 times more excitatory than inhibitory
+        # inputs, inhibitory weights 4 times stronger, so the mean input
+        # current (and its rate modulation) cancels.
+        ei_ratio = 4
+        g = 4.
+        syn_n_in = int(round(syn_n_ex / ei_ratio))
+        neuron.set(tau_syn_ex=tau_syn, tau_syn_in=tau_syn)
+        I_noise = find_syn_noise_weight(noise_level_Vm, syn_n_ex, syn_rate,
+                                        ei_ratio=ei_ratio, g=g, tau_syn=tau_syn,
+                                        tau_m=tau_m, C_m=C, resolution=resolution)
+        # Each parrot relays its own realisation of the modulated rate.
+        noise = nest.Create("sinusoidal_poisson_generator", params={
+            "rate": syn_rate,
+            "amplitude": syn_ampl,
+            "frequency": syn_freq,
+            "phase": 0.0,
+        })
+        parrots_ex = nest.Create("parrot_neuron", syn_n_ex)
+        parrots_in = nest.Create("parrot_neuron", syn_n_in)
+        nest.Connect(noise, parrots_ex)
+        nest.Connect(noise, parrots_in)
+        syn_delay = 1.5
+        nest.Connect(parrots_ex, neuron,
+                     syn_spec={"weight": I_noise, "delay": syn_delay})
+        nest.Connect(parrots_in, neuron,
+                     syn_spec={"weight": -g * I_noise, "delay": syn_delay})
     else:
-        raise ValueError(f"Unknown noise_type '{noise_type}'. Must be 'gaussian' or 'multisine'.")
+        raise ValueError(f"Unknown noise_type '{noise_type}'. "
+                         f"Must be 'gaussian', 'multisine' or 'syn_noise'.")
 
     multimeter = nest.Create(
         "multimeter",
@@ -522,7 +604,8 @@ def run_single_cell_simulation(sim_time=10e3,
     nest.Connect(multimeter, neuron)
     nest.Connect(neuron, spike_recorder)
     nest.Connect(sine, neuron)
-    nest.Connect(noise, neuron)
+    if noise_type != "syn_noise":  # syn_noise is connected through parrots
+        nest.Connect(noise, neuron)
 
     # Simulating and recording results
     nest.Simulate(sim_time + cutoff + 1)
@@ -1000,20 +1083,23 @@ def plot_compare_Vms(sim_list):
 
 if __name__ == "__main__":
 
-    dt = 0.025
+    dt = 0.05#0.025
     force_rerun = False
     welch_segments = 8
     # noise_type = "multisine"
     noise_type = "gaussian"
+    noise_type = "syn_noise"
+
+    noise_level_Vm = 5.
 
     carrier_f = 2000.
     beat_f = 20.
 
     sim_params_1ABC = dict(
-        sim_time=10000e3,
+        sim_time=100e3,
         target_stim_dVm=0.0,
         f_values=[beat_f],
-        noise_level_Vm=4.,
+        noise_level_Vm=noise_level_Vm,
         seed=2,
         V_th=-50.,
         resolution=dt,
@@ -1028,7 +1114,7 @@ if __name__ == "__main__":
         sim_time=1e3,
         target_stim_dVm=0.0,
         f_values=[beat_f],
-        noise_level_Vm=4.,
+        noise_level_Vm=noise_level_Vm,
         seed=2,
         V_th=-00.,
         resolution=dt,
@@ -1039,6 +1125,26 @@ if __name__ == "__main__":
         noise_type=noise_type,
     )
 
+
+    sim_params_S0_syn = dict(
+        sim_time=100e3,
+        target_stim_dVm=0.0,
+        f_values=[beat_f],
+        noise_level_Vm=noise_level_Vm,
+        noise_type="syn_noise",
+        syn_n_ex=800,
+        syn_rate=10.,
+        syn_ampl=0.,
+        syn_freq=beat_f,
+        tau_syn=2.,
+        seed=2,
+        V_th=-50.,
+        resolution=dt,
+        sim_name=f"FigS0_dt:{dt}_{carrier_f}_{beat_f}_syn_noise",
+        force_rerun=force_rerun,
+        description="only synaptic noise - high spike threshold",
+        save_Vm="full",
+    )
 
     sim_params_S1 = dict(
         sim_time=10e3,
@@ -1056,10 +1162,10 @@ if __name__ == "__main__":
     )
 
     sim_params_1DEF = dict(
-        sim_time=10000e3,
+        sim_time=1000e3,
         target_stim_dVm=0.3,
         f_values=[beat_f],
-        noise_level_Vm=4.,
+        noise_level_Vm=noise_level_Vm,
         seed=2,
         V_th=-50.,
         resolution=dt,
@@ -1086,10 +1192,10 @@ if __name__ == "__main__":
     )
 
     sim_params_1GHI = dict(
-        sim_time=10000e3,
+        sim_time=1000e3,
         target_stim_dVm=0.3,
         f_values=[carrier_f],
-        noise_level_Vm=4.,
+        noise_level_Vm=noise_level_Vm,
         seed=2,
         V_th=-50.,
         resolution=dt,
@@ -1116,10 +1222,10 @@ if __name__ == "__main__":
     )
 
     sim_params_1JKL = dict(
-        sim_time=10000e3,
+        sim_time=1000e3,
         target_stim_dVm=0.3,
         f_values=[carrier_f, carrier_f + beat_f],
-        noise_level_Vm=4.,
+        noise_level_Vm=noise_level_Vm,
         seed=2,
         V_th=-50.,
         resolution=dt,
@@ -1131,10 +1237,10 @@ if __name__ == "__main__":
     )
 
     sim_params_weak = dict(
-        sim_time=10000e3,
+        sim_time=1000e3,
         target_stim_dVm=0.3,
         f_values=[carrier_f, carrier_f + beat_f],
-        noise_level_Vm=4.,
+        noise_level_Vm=noise_level_Vm,
         seed=2,
         V_th=-50.,
         resolution=dt,
@@ -1148,7 +1254,7 @@ if __name__ == "__main__":
     sim_params_list = [sim_params_S1, sim_params_S2, sim_params_S3]
     fig_1_list = [sim_params_1ABC, sim_params_1DEF, sim_params_1GHI, sim_params_1JKL]
 
-    for sim_params in [sim_params_weak]:#sim_params_list + fig_1_list:
+    for sim_params in [sim_params_1GHI]: #
         results = run_single_cell_simulation(**sim_params)
         if sim_params["sim_name"].startswith("FigS2"):
             tlim = [5, 5.01]
@@ -1157,7 +1263,7 @@ if __name__ == "__main__":
         else:
             tlim = [5, 6]
 
-        plot_single_cell_results(results, sim_params, use_welch=True,
+        plot_single_cell_results(results, sim_params, use_welch=False,
                                  welch_segments=welch_segments, tlim=tlim)
 
 
