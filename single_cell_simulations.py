@@ -1096,7 +1096,7 @@ if __name__ == "__main__":
     beat_f = 20.
 
     sim_params_1ABC = dict(
-        sim_time=100e3,
+        sim_time=1000e3,
         target_stim_dVm=0.0,
         f_values=[beat_f],
         noise_level_Vm=noise_level_Vm,
@@ -1254,7 +1254,7 @@ if __name__ == "__main__":
     sim_params_list = [sim_params_S1, sim_params_S2, sim_params_S3]
     fig_1_list = [sim_params_1ABC, sim_params_1DEF, sim_params_1GHI, sim_params_1JKL]
 
-    for sim_params in [sim_params_1GHI]: #
+    for sim_params in sim_params_list + fig_1_list:
         results = run_single_cell_simulation(**sim_params)
         if sim_params["sim_name"].startswith("FigS2"):
             tlim = [5, 5.01]
