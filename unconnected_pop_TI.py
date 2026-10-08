@@ -27,6 +27,7 @@ from scipy.signal import welch
 from single_cell_simulations import (
     find_I,
     find_noise_std,
+    find_ou_noise_std,
     find_spike_rate,
     return_freq_and_psd,
     calculate_spectral_snr_and_zscore,
@@ -54,6 +55,8 @@ def run_network_simulation(pop_size=100,
                            f_values=[1000, 1020],
                            target_stim_dVm=0.3,
                            noise_level_Vm=4.0,
+                           noise_type="gaussian",
+                           tau_ou=5.,
                            C=100,
                            V_th=-50.0,
                            E_m=-60.0,
@@ -86,6 +89,15 @@ def run_network_simulation(pop_size=100,
     noise_level_Vm : float
         Vm-noise standard deviation (mV) for each presynaptic neuron. Same
         amplitude for all, but each neuron gets its own independent realisation.
+    noise_type : str
+        "gaussian" (white noise, iaf_psc_alpha neurons) or "ou"
+        (Ornstein-Uhlenbeck current with correlation time `tau_ou` ms). As in
+        run_single_cell_simulation, the OU current is generated inside NEST
+        by connecting the noise_generators to the filtered current port
+        (receptor_type=1) of iaf_psc_exp neurons with tau_syn_ex = `tau_ou`,
+        so it costs no extra memory.
+    tau_ou : float
+        OU correlation time (ms), only used for noise_type="ou".
     C, V_th, E_m, tau_m : float
         Neuron parameters, shared by populations E, I and neuron B.
     n_record, n_record_I : int
@@ -127,6 +139,13 @@ def run_network_simulation(pop_size=100,
         "sim_name": sim_name,
         "save_Vm": save_Vm,
     }
+    if noise_type == "ou":
+        # Only added for OU noise so existing (gaussian) cache files remain valid.
+        params.update({"noise_type": noise_type, "tau_ou": tau_ou,
+                       "neuron_model": "iaf_psc_exp"})
+    elif noise_type != "gaussian":
+        raise ValueError(f"Unknown noise_type '{noise_type}'. "
+                         f"Must be 'gaussian' or 'ou'.")
 
     save_path = os.path.join(save_dir, f"{sim_name}.pkl")
 
@@ -173,18 +192,27 @@ def run_network_simulation(pop_size=100,
         "I_e": 0.0,
         "tau_m": tau_m,
     }
-    pop_E = nest.Create("iaf_psc_alpha", pop_size, params=neuron_params)
+    if noise_type == "ou":
+        # Identical to iaf_psc_alpha for the (unfiltered) sine input; the
+        # exponential synaptic filter turns the noise into an OU current.
+        neuron_params["tau_syn_ex"] = tau_ou
+        pop_E = nest.Create("iaf_psc_exp", pop_size, params=neuron_params)
+    else:
+        pop_E = nest.Create("iaf_psc_alpha", pop_size, params=neuron_params)
 
     # --- Independent noise, common amplitude, per presynaptic neuron ----------
     # A single noise_generator sends the SAME signal to all its targets, so
     # independent noise requires one device per neuron (each device draws its
     # own stream from the kernel RNG). Same std -> same amplitude, different
     # realisation per neuron.
-    I_noise = find_noise_std(noise_level_Vm, tau_m=tau_m, C_m=C, resolution=resolution)
+    if noise_type == "ou":
+        I_noise, I_ou = find_ou_noise_std(noise_level_Vm, tau_ou, tau_m=tau_m,
+                                          C_m=C, resolution=resolution)
+    else:
+        I_noise = find_noise_std(noise_level_Vm, tau_m=tau_m, C_m=C, resolution=resolution)
     noise_E = nest.Create(
         "noise_generator", pop_size,
         params={"mean": 0.0, "std": I_noise, "dt": resolution})
-
 
     # --- Shared temporal-interference stimulus --------------------------------
     # One ac_generator per carrier frequency, connected to every E and I
@@ -220,7 +248,8 @@ def run_network_simulation(pop_size=100,
     # Shared stimulus and per-neuron noise onto both populations.
 
     nest.Connect(sine, pop_E, "all_to_all")
-    nest.Connect(noise_E, pop_E, "one_to_one")
+    noise_syn_spec = {"receptor_type": 1} if noise_type == "ou" else None
+    nest.Connect(noise_E, pop_E, "one_to_one", syn_spec=noise_syn_spec)
 
     # Recordings: subsets of E and I (Vm + spikes), all of E and I (spikes
     # only), and B.
@@ -279,8 +308,11 @@ def run_network_simulation(pop_size=100,
         "I_amp": I_amp,
         "noise_level_Vm": noise_level_Vm,
         "I_noise": I_noise,
+        "noise_type": noise_type,
         "E": E_res,
     }
+    if noise_type == "ou":
+        results.update({"tau_ou": tau_ou, "I_ou": I_ou})
 
 
 
@@ -454,18 +486,19 @@ def plot_network_results(results, sim_params,
 
 if __name__ == "__main__":
 
-    weight_factor = 4.3
     target_stim_dVm = 0.03
     dt = 0.025
     carrier_f = 2000
     beat_f = 20
+    noise_type = "ou"
+    noise_level_Vm = 5.
 
     sim_params = dict(
-        pop_size=100000,
+        pop_size=10000,
         sim_time=1000e3,
         f_values=[carrier_f, carrier_f + beat_f],
         target_stim_dVm=target_stim_dVm,
-        noise_level_Vm=4.0,
+        noise_level_Vm=noise_level_Vm,
         C=100,
         V_th=-50.,
         E_m=-60.,
@@ -475,8 +508,9 @@ if __name__ == "__main__":
         seed=2,
         resolution=dt,
         n_threads=4,
-        sim_name=f"network_pop_size_test_{target_stim_dVm}_{carrier_f}_{beat_f}",
+        sim_name=f"network_pop_size_{noise_type}_{target_stim_dVm}_{carrier_f}_{beat_f}",
         force_rerun=False,
+        noise_type=noise_type,
         save_Vm=True,
     )
 

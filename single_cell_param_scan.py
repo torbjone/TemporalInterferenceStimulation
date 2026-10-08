@@ -12,6 +12,7 @@ The three matrices are shown as color plots (imshow), one panel each.
 """
 
 import os
+from os.path import join
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -88,10 +89,14 @@ def run_param_scan(target_stim_dVms, noise_level_Vms, const_params,
                               save_Vm="cut")
 
             results = run_single_cell_simulation(**sim_params)
-            plot_single_cell_results(results, sim_params, fig_folder="param_scan_figs")
+            plot_single_cell_results(results,
+                                     sim_params,
+                                     fig_folder="param_scan_figs",
+                                     use_welch=use_welch)
             power, snr, snr2 = analyze_firing_rate(
                 results, const_params["sim_time"], analysis_freq,
-                bin_size=firing_rate_bin_size,  use_welch=use_welch, welch_segments=welch_segments)
+                bin_size=firing_rate_bin_size,  use_welch=use_welch,
+                welch_segments=welch_segments)
 
             firing_rate[i, j] = results["firing_rate"]
             fr_power[i, j] = power
@@ -118,10 +123,14 @@ def plot_param_scan(firing_rate, fr_power, fr_SNR, fr_z_score,
     defaults to a log-spaced set if not given. The firing-rate and power panels
     use `n_levels` automatically-placed levels."""
     if snr_levels is None:
-        snr_levels = [2, 5, 10, 20, 50, 100, 200]
+        snr_levels = [5, 10, 20, 40, 80, 160, 320, 640]
 
-    fr_levels = [25, 50, 100, 200, 400, 800, 1600, 3200]
-    snr_levels = np.asarray(snr_levels, dtype=float)
+    # Log-spaced power levels spanning the data (in decades), since the PSD
+    # value at a spectral line scales with the simulation duration.
+    fr_pos = np.abs(fr_power[np.isfinite(fr_power) & (fr_power != 0)])
+    fr_levels = np.logspace(np.floor(np.log10(fr_pos.min())),
+                            np.ceil(np.log10(fr_pos.max())), 10)
+    snr_levels =  [5, 10, 20, 40, 80, 160, 320, 640]#np.asarray(snr_levels, dtype=float)
     z_score_levels = np.logspace(0., 3, 10)
     print(f"z_score_levels: {z_score_levels}")
 
@@ -130,6 +139,7 @@ def plot_param_scan(firing_rate, fr_power, fr_SNR, fr_z_score,
     # matrix is transposed from [noise, dVm] to [dVm, noise] to match (Y, X).
     X, Y = np.meshgrid(noise_level_Vms, target_stim_dVms)
 
+    print(fr_power)
     # (matrix, title, levels, log_scale) - the SNR panel uses manual levels on
     # a logarithmic colour scale; the others use automatic linear levels.
     panels = [
@@ -166,16 +176,16 @@ def plot_param_scan(firing_rate, fr_power, fr_SNR, fr_z_score,
         if log_scale:
            cbar = fig.colorbar(cf, ax=ax, fraction=0.046, pad=0.04)
            cbar.set_ticks(levels)
-           cbar.set_ticklabels([f"{int(l)}" for l in levels])
+           cbar.set_ticklabels([f"{l:.3g}" for l in levels])
 
         else:
            cbar = fig.colorbar(cf, ax=ax, fraction=0.046, pad=0.04, label="")
         cbar.set_label(label, labelpad=-1)
-        ax.plot(4, 0.3, '*', c='orange', ms=8)
+        ax.plot(5, 0.3, '*', c='orange', ms=8)
 
     simplify_axes(list(axes))
     mark_subplots(list(axes), ypos=1.05)
-    fig.savefig(save_name, dpi=150)
+    fig.savefig(join("figures", save_name), dpi=150)
     print(f"\nSaved figure to '{save_name}'")
     return fig
 
@@ -186,10 +196,10 @@ if __name__ == "__main__":
     analysis_freq = 20.0
     carrier_freq = 2000.0
     dt = 0.025
-
+    noise_type = "ou"
     # Parameters held constant across the scan.
     const_params = dict(
-        sim_time=10000e3,
+        sim_time=3000e3,
         f_values=[carrier_freq, carrier_freq + analysis_freq],
         seed=2,
         V_th=-50.,
@@ -197,7 +207,9 @@ if __name__ == "__main__":
         C=100,
         tau_m=10,
         resolution=dt,
-        force_rerun=True,
+        force_rerun=False,
+        noise_type=noise_type,
+        description="param scan OU noise",
     )
 
     # Scanned axes:
@@ -206,7 +218,7 @@ if __name__ == "__main__":
 
     rerun_scan = True
     welch_segments = 8
-    use_welch = True
+    use_welch = False
 
     if rerun_scan:
         firing_rate, fr_power, fr_SNR, fr_z_score = run_param_scan(

@@ -172,8 +172,53 @@ def generate_multisine_current(sim_time, cutoff, resolution, noise_level_Vm,
     return tvec, I_t, freqs, I_0_pA
 
 
+def find_ou_noise_std(noise_level_Vm, tau_ou, tau_m=10., C_m=100., resolution=0.1):
+    """Noise_generator current std (pA), and the resulting stationary std (pA)
+    of the Ornstein-Uhlenbeck current, that produce a membrane-potential
+    standard deviation of `noise_level_Vm` mV in the subthreshold iaf_psc_exp
+    neuron, when the noise_generator is connected to its filtered current
+    port (receptor_type=1) and tau_syn_ex = `tau_ou`.
+
+    NEST passes current on receptor 1 through the exponential excitatory
+    synaptic filter, so the piecewise-constant Gaussian noise u_k (std
+    sigma_u, redrawn every `resolution` ms) becomes the exact discrete OU
+    process
+        I_{k+1} = c*I_k + (1-c)*u_k,     c = exp(-dt/tau_ou),
+    with stationary std sigma_I = sigma_u * sqrt((1 - c) / (1 + c)). The
+    membrane is updated as x_{k+1} = a*x_k + P21*I_k, with a = exp(-dt/tau_m)
+    and NEST's exact propagator
+        P21 = tau_ou*tau_m / (C_m*(tau_m - tau_ou)) * (a - c).
+    An AR(1) filter driven by AR(1) input has the stationary variance
+        sigma_V^2 = (P21*sigma_I)^2 * (1 + a*c) / ((1 - a^2) * (1 - a*c)),
+    which for dt -> 0 approaches the continuous result
+    sigma_V^2 = (R*sigma_I)^2 * tau_ou / (tau_ou + tau_m), R = tau_m/C_m.
+    Inverting gives sigma_I and sigma_u. Returns (sigma_u, sigma_I) in pA.
+    `tau_ou`, `tau_m`, `resolution` in ms and `C_m` in pF, to match the
+    simulation parameters."""
+    h = resolution
+    a = math.exp(-h / tau_m)
+    c = math.exp(-h / tau_ou)
+    if abs(tau_m - tau_ou) < 1e-10 * tau_m:
+        P21 = h / C_m * a                        # limit tau_ou -> tau_m
+    else:
+        P21 = tau_ou * tau_m / (C_m * (tau_m - tau_ou)) * (a - c)  # mV/pA
+    sigma_I = noise_level_Vm / (P21 * math.sqrt((1 + a * c) / ((1 - a**2) * (1 - a * c))))
+    sigma_u = sigma_I * math.sqrt((1 + c) / (1 - c))
+    return sigma_u, sigma_I
+
+
 def return_freq_and_psd(tvec, sig):
-    """ Returns the amplitude and frequency of the input signal"""
+    """Returns the frequencies (Hz, >= 1 Hz) and the one-sided power spectral
+    density (periodogram) of `sig`, in units of sig^2/Hz.
+
+    `tvec` is either the time vector (ms) of `sig` or its time step (ms). The
+    PSD is normalised as PSD(f_k) = 2 * dt * |FFT_k|^2 / N, the same
+    convention as scipy.signal.welch (density scaling), so it is independent
+    of the time step and of the signal duration T for broadband signals:
+    e.g. a Poisson spike train of rate r gives a noise floor of 2*r, and
+    sum(PSD) * df (df = 1/T) is the signal variance. A sinusoidal component
+    of amplitude A falls in a single bin with PSD = A^2/2 * T, i.e. its power
+    is PSD * df = A^2/2."""
     import scipy.fftpack as ff
     sig = np.array(sig)
     if len(sig.shape) == 1:
@@ -182,16 +227,18 @@ def return_freq_and_psd(tvec, sig):
         pass
     else:
         raise RuntimeError("Not compatible with given array shape!")
-    timestep = (tvec[1] - tvec[0])/1000. if type(tvec) in [list, np.ndarray] else tvec
+    dt_ms = (tvec[1] - tvec[0]) if type(tvec) in [list, np.ndarray] else tvec
+    timestep = dt_ms / 1000.   # ms -> s
+    N = sig.shape[1]
 
-    sample_freq = ff.fftfreq(sig.shape[1], d=timestep)
+    sample_freq = ff.fftfreq(N, d=timestep)
     pidxs = np.where(sample_freq >= 1)
     freqs = sample_freq[pidxs]
 
     Y = ff.fft(sig, axis=1)[:, pidxs[0]]
 
-    amplitude = np.abs(Y)**2/Y.shape[1]
-    return freqs, amplitude
+    psd = 2 * timestep * np.abs(Y)**2 / N
+    return freqs, psd
 
 
 def simplify_axes(axes):
@@ -395,14 +442,17 @@ def run_single_cell_simulation(sim_time=10e3,
                                noise_type="gaussian", noise_freqs=None,
                                syn_n_ex=800, syn_rate=10., syn_ampl=0.,
                                syn_freq=20., tau_syn=2.,
+                               tau_ou=5.,
                                C=100,
                                V_th=-50.0, E_m=-60.0, tau_m=10,
                                seed=2, resolution=0.1, sim_name="test",
                                save_dir="results", force_rerun=False,
                                save_Vm="cut", description=""):
     """This function creates:
-    -Single iaf_psc_alpha neuron (LIF w/alpha-shaped postsynaptic currents)
-    -noise using a noise_generator (Gaussian distribution), step_current_generator (multisine)
+    -Single iaf_psc_alpha neuron (LIF w/alpha-shaped postsynaptic currents),
+     or iaf_psc_exp for noise_type="ou" (see below)
+    -noise using a noise_generator (Gaussian distribution, or low-pass filtered
+     into an Ornstein-Uhlenbeck current), step_current_generator (multisine)
      or balanced excitatory/inhibitory Poisson synaptic input (syn_noise)
     -spike_recorder to get the spike times
     -multimeter to plot the membrane potential manually
@@ -417,7 +467,18 @@ def run_single_cell_simulation(sim_time=10e3,
     -V_th : threshold potential
     -sim_time: Simulation time
     -times : times when Vm was recorded
-    -noise_type: Type of noise applied ("gaussian", "multisine" or "syn_noise")
+    -noise_type: Type of noise applied ("gaussian", "multisine", "ou" or "syn_noise")
+
+    For noise_type="ou" the neuron receives an Ornstein-Uhlenbeck (exponentially
+    correlated, Lorentzian-spectrum) current with correlation time `tau_ou`
+    (ms), whose std is set (find_ou_noise_std) so that it drives a
+    `noise_level_Vm` mV Vm standard deviation. It is generated inside NEST
+    (no precomputed current, so no memory cost): the neuron is an
+    iaf_psc_exp with tau_syn_ex = `tau_ou`, and a noise_generator is connected
+    to its filtered current port (receptor_type=1), which low-pass filters
+    the white noise into an exact discrete OU process. For current inputs on
+    the default port (the sines) iaf_psc_exp and iaf_psc_alpha are identical,
+    and the neuron receives no synaptic input, so only the noise changes.
 
     For noise_type="syn_noise" the neuron receives `syn_n_ex` excitatory and
     syn_n_ex/4 inhibitory inputs (parrot_neurons relaying independent
@@ -461,6 +522,10 @@ def run_single_cell_simulation(sim_time=10e3,
             "syn_freq": syn_freq,
             "tau_syn": tau_syn,
         })
+    elif noise_type == "ou":
+        # neuron_model marks the in-NEST filtered-noise implementation, so
+        # caches from the earlier precomputed-current version are rerun.
+        params.update({"tau_ou": tau_ou, "neuron_model": "iaf_psc_exp"})
 
     save_path = os.path.join(save_dir, f"{sim_name}.pkl")
 
@@ -502,7 +567,7 @@ def run_single_cell_simulation(sim_time=10e3,
 
     cutoff = 1000
 
-    neuron = nest.Create("iaf_psc_alpha")
+    neuron = nest.Create("iaf_psc_exp" if noise_type == "ou" else "iaf_psc_alpha")
 
     neuron.set(V_th=V_th)
     neuron.set(V_m=E_m)
@@ -546,6 +611,17 @@ def run_single_cell_simulation(sim_time=10e3,
                 "amplitude_values": list(amp_values),
             }
         )
+    elif noise_type == "ou":
+        # White noise low-pass filtered by the neuron's tau_syn_ex = tau_ou
+        # (receptor_type=1, connected below) into an OU current. I_noise is
+        # the noise_generator std, I_ou the resulting OU current std.
+        neuron.set(tau_syn_ex=tau_ou)
+        I_noise, I_ou = find_ou_noise_std(noise_level_Vm, tau_ou, tau_m=tau_m,
+                                          C_m=C, resolution=resolution)
+        noise = nest.Create(
+            "noise_generator",
+            params={"mean": 0.0, "std": I_noise, "dt": resolution},
+        )
     elif noise_type == "syn_noise":
         # Balanced synaptic noise: 4 times more excitatory than inhibitory
         # inputs, inhibitory weights 4 times stronger, so the mean input
@@ -575,7 +651,7 @@ def run_single_cell_simulation(sim_time=10e3,
                      syn_spec={"weight": -g * I_noise, "delay": syn_delay})
     else:
         raise ValueError(f"Unknown noise_type '{noise_type}'. "
-                         f"Must be 'gaussian', 'multisine' or 'syn_noise'.")
+                         f"Must be 'gaussian', 'multisine', 'ou' or 'syn_noise'.")
 
     multimeter = nest.Create(
         "multimeter",
@@ -604,7 +680,9 @@ def run_single_cell_simulation(sim_time=10e3,
     nest.Connect(multimeter, neuron)
     nest.Connect(neuron, spike_recorder)
     nest.Connect(sine, neuron)
-    if noise_type != "syn_noise":  # syn_noise is connected through parrots
+    if noise_type == "ou":  # filtered current port
+        nest.Connect(noise, neuron, syn_spec={"receptor_type": 1})
+    elif noise_type != "syn_noise":  # syn_noise is connected through parrots
         nest.Connect(noise, neuron)
 
     # Simulating and recording results
@@ -626,6 +704,8 @@ def run_single_cell_simulation(sim_time=10e3,
         "I_noise": I_noise,
         "noise_type": noise_type,
     }
+    if noise_type == "ou":
+        results.update({"tau_ou": tau_ou, "I_ou": I_ou})
     if save_Vm == "cut":
         savemask = times < 10000
         results.update({ "Vm": V_m[savemask], "times": times[savemask] ,})
@@ -709,10 +789,10 @@ def plot_single_cell_results(results, sim_params,
 
     snr_results = calculate_spectral_snr_and_zscore(freqs_fr, fr_psd, stim_freq, freq_window=5)
     fr_SNR = snr_results['snr_peak_ratio']
-    # print("===========")
-    # print("Sim name: ", sim_name)
-    # print(f"Old SNR: {fr_SNR_old}")
-    # print(f"New SNR: {snr_results}")
+    print("===========")
+    print("Sim name: ", sim_name)
+    print(f"Old SNR: {fr_SNR_old}")
+    print(f"New SNR: {snr_results}")
 
     if has_vm:
         vm_SNR_old = compute_SNR(freqs_vm, vm_psd, stim_freq)
@@ -1083,12 +1163,13 @@ def plot_compare_Vms(sim_list):
 
 if __name__ == "__main__":
 
-    dt = 0.05#0.025
+    dt = 0.025
     force_rerun = False
     welch_segments = 8
     # noise_type = "multisine"
     noise_type = "gaussian"
     noise_type = "syn_noise"
+    noise_type = "ou"
 
     noise_level_Vm = 5.
 
@@ -1096,7 +1177,7 @@ if __name__ == "__main__":
     beat_f = 20.
 
     sim_params_1ABC = dict(
-        sim_time=1000e3,
+        sim_time=3000e3,
         target_stim_dVm=0.0,
         f_values=[beat_f],
         noise_level_Vm=noise_level_Vm,
@@ -1111,7 +1192,7 @@ if __name__ == "__main__":
     )
 
     sim_params_S0 = dict(
-        sim_time=1e3,
+        sim_time=10e3,
         target_stim_dVm=0.0,
         f_values=[beat_f],
         noise_level_Vm=noise_level_Vm,
@@ -1146,6 +1227,23 @@ if __name__ == "__main__":
         save_Vm="full",
     )
 
+    tau_ou = 5.
+    sim_params_S0_ou = dict(
+        sim_time=10e3,
+        target_stim_dVm=0.0,
+        f_values=[beat_f],
+        noise_level_Vm=noise_level_Vm,
+        noise_type="ou",
+        tau_ou=tau_ou,
+        seed=2,
+        V_th=-00.,
+        resolution=dt,
+        sim_name=f"FigS0_dt:{dt}_{carrier_f}_{beat_f}_ou_tau:{tau_ou}",
+        force_rerun=force_rerun,
+        description="only OU noise - high spike threshold",
+        save_Vm="full",
+    )
+
     sim_params_S1 = dict(
         sim_time=10e3,
         target_stim_dVm=0.3,
@@ -1162,7 +1260,7 @@ if __name__ == "__main__":
     )
 
     sim_params_1DEF = dict(
-        sim_time=1000e3,
+        sim_time=3000e3,
         target_stim_dVm=0.3,
         f_values=[beat_f],
         noise_level_Vm=noise_level_Vm,
@@ -1192,7 +1290,7 @@ if __name__ == "__main__":
     )
 
     sim_params_1GHI = dict(
-        sim_time=1000e3,
+        sim_time=3000e3,
         target_stim_dVm=0.3,
         f_values=[carrier_f],
         noise_level_Vm=noise_level_Vm,
@@ -1222,7 +1320,7 @@ if __name__ == "__main__":
     )
 
     sim_params_1JKL = dict(
-        sim_time=1000e3,
+        sim_time=3000e3,
         target_stim_dVm=0.3,
         f_values=[carrier_f, carrier_f + beat_f],
         noise_level_Vm=noise_level_Vm,
@@ -1237,8 +1335,8 @@ if __name__ == "__main__":
     )
 
     sim_params_weak = dict(
-        sim_time=1000e3,
-        target_stim_dVm=0.3,
+        sim_time=3000e3,
+        target_stim_dVm=0.1,
         f_values=[carrier_f, carrier_f + beat_f],
         noise_level_Vm=noise_level_Vm,
         seed=2,
@@ -1254,30 +1352,30 @@ if __name__ == "__main__":
     sim_params_list = [sim_params_S1, sim_params_S2, sim_params_S3]
     fig_1_list = [sim_params_1ABC, sim_params_1DEF, sim_params_1GHI, sim_params_1JKL]
 
-    for sim_params in sim_params_list + fig_1_list:
-        results = run_single_cell_simulation(**sim_params)
-        if sim_params["sim_name"].startswith("FigS2"):
-            tlim = [5, 5.01]
-        elif sim_params["sim_name"].startswith("FigS3b"):
-            tlim = [5, 5.05]
-        else:
-            tlim = [5, 6]
+    #for sim_params in sim_params_list + fig_1_list:
+    #    results = run_single_cell_simulation(**sim_params)
+    #    if sim_params["sim_name"].startswith("FigS2"):
+    #        tlim = [5, 5.01]
+    #    elif sim_params["sim_name"].startswith("FigS3b"):
+    #        tlim = [5, 5.05]
+    #    else:
+    #        tlim = [5, 6]
+#
+#        plot_single_cell_results(results, sim_params, use_welch=False,
+#                                 welch_segments=welch_segments, tlim=tlim)
 
-        plot_single_cell_results(results, sim_params, use_welch=False,
-                                 welch_segments=welch_segments, tlim=tlim)
 
+    for psd_segments in [1, 2, 4, 5, 6, 8, 10, 15, 16]:
+        print("PSD segments: ", psd_segments, "")
+        plot_combined_single_cell_examples(fig_1_list,
+                                           firing_rate_bin_size=dt,
+                                           psd_segments=psd_segments,
+                                           tlim=[2., 2.200],
+                                           save_name=f"Fig1_combined_{psd_segments}psd_segments.png")
+    plot_combined_single_cell_examples(fig_1_list,
+                                       psd_segments=8,
+                                       firing_rate_bin_size=dt,
+                                       tlim=[2.00, 2.2],
+                                       save_name=f"Fig1_combined_{10}psd_segments.pdf")
 
-    # for psd_segments in [1, 2, 4, 5, 6, 8, 10, 15, 16]:
-    #     print("PSD segments: ", psd_segments, "")
-    #     plot_combined_single_cell_examples(fig_1_list,
-    #                                        firing_rate_bin_size=dt,
-    #                                        psd_segments=psd_segments,
-    #                                        tlim=[2., 2.200],
-    #                                        save_name=f"Fig1_combined_{psd_segments}psd_segments.png")
-    # plot_combined_single_cell_examples(fig_1_list,
-    #                                    psd_segments=8,
-    #                                    firing_rate_bin_size=dt,
-    #                                    tlim=[2.00, 2.2],
-    #                                    save_name=f"Fig1_combined_{10}psd_segments.pdf")
-
-    # plot_compare_Vms(fig_1_list)
+    plot_compare_Vms(fig_1_list)
