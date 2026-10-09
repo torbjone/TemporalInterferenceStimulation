@@ -24,6 +24,8 @@ import numpy as np
 import matplotlib.pyplot as plt
 from scipy.signal import welch
 
+from matplotlib.colors import LogNorm
+
 from single_cell_simulations import (
     find_I,
     find_noise_std,
@@ -33,6 +35,7 @@ from single_cell_simulations import (
     calculate_spectral_snr_and_zscore,
     compute_SNR,
     simplify_axes,
+    mark_subplots,
 )
 
 
@@ -69,7 +72,8 @@ def run_network_simulation(pop_size=100,
                            sim_name="network_ei_test",
                            save_dir="results",
                            force_rerun=False,
-                           save_Vm=True):
+                           save_Vm=True,
+                           save_all_spikes=False):
     """Simulate the (E, I) -> B feed-forward network and return a results dict.
 
     Parameters
@@ -117,6 +121,11 @@ def run_network_simulation(pop_size=100,
         Simulation time step (ms).
     sim_name, save_dir, force_rerun, save_Vm
         Caching / output controls, as in run_single_cell_simulation.
+    save_all_spikes : bool
+        Also store the spike times and neuron indices (0 .. pop_size-1) of the
+        whole population (results["E"]["all_spike_times"/"all_spike_ids"]),
+        so that smaller sub-populations and shorter durations can be analysed
+        afterwards (see analyze_pop_size_duration).
     """
 
     # All input parameters that define the simulation. Saved together with the
@@ -139,6 +148,9 @@ def run_network_simulation(pop_size=100,
         "sim_name": sim_name,
         "save_Vm": save_Vm,
     }
+    if save_all_spikes:
+        # Only added when used so existing cache files remain valid.
+        params["save_all_spikes"] = True
     if noise_type == "ou":
         # Only added for OU noise so existing (gaussian) cache files remain valid.
         params.update({"noise_type": noise_type, "tau_ou": tau_ou,
@@ -240,7 +252,6 @@ def run_network_simulation(pop_size=100,
     sr_E = nest.Create("spike_recorder", params={"start": cutoff})
 
     # Spikes of the ENTIRE populations, to reconstruct the full population rates
-    # that drive neuron B (all E and I neurons project to B, not just subsets).
     sr_E_all = nest.Create("spike_recorder", params={"start": cutoff})
 
 
@@ -251,11 +262,10 @@ def run_network_simulation(pop_size=100,
     noise_syn_spec = {"receptor_type": 1} if noise_type == "ou" else None
     nest.Connect(noise_E, pop_E, "one_to_one", syn_spec=noise_syn_spec)
 
-    # Recordings: subsets of E and I (Vm + spikes), all of E and I (spikes
-    # only), and B.
-
+    # Recordings: subsets of E
     nest.Connect(mm_E, rec_E)
     nest.Connect(rec_E, sr_E)
+
     nest.Connect(pop_E, sr_E_all)
 
     # --- Simulate -------------------------------------------------------------
@@ -280,7 +290,8 @@ def run_network_simulation(pop_size=100,
             mask = sr_events["senders"] == gid
             spike_times[int(gid)] = np.sort(sr_events["times"][mask] - cutoff)
 
-        all_times = sr_all.get("events")["times"] - cutoff
+        all_events = sr_all.get("events")
+        all_times = all_events["times"] - cutoff
         pop_rate, t_bins = find_spike_rate(all_times, pop_rate_bin_size, sim_time)
         out = {
             "recorded_ids": rec_ids,
@@ -297,6 +308,10 @@ def run_network_simulation(pop_size=100,
                 mm_events["V_m"][mm_events["senders"] == gid] for gid in rec_ids
             ]) if len(rec_ids) else np.empty((0, 0))
             out["Vm"] = Vm
+        if save_all_spikes:
+            first_gid = int(np.min(np.atleast_1d(pop_E.global_id)))
+            out["all_spike_times"] = all_times
+            out["all_spike_ids"] = (all_events["senders"] - first_gid).astype(np.int32)
         return out
 
     E_res = _collect_pop(rec_E, sr_E, sr_E_all, mm_E)
@@ -327,7 +342,7 @@ def run_network_simulation(pop_size=100,
 
 
 def plot_network_results(results, sim_params,
-                         tlim=[5, 6], max_f=2000,
+                         tlim=[5, 6], max_f=2200,
                          firing_rate_bin_size=None, use_welch=True, welch_segments=10):
     """Plot the network output.
 
@@ -478,9 +493,156 @@ def plot_network_results(results, sim_params,
 
 
     simplify_axes(fig.axes)
-    out_name = join("figures", f"{sim_name}_network_pop_size_{int(sim_params['sim_time'] / 1000)}s.png")
+    out_name = join("figures", f"{sim_name}_network_pop_size_{int(sim_params['sim_time'] / 1000)}s_{use_welch}.png")
     plt.savefig(out_name, dpi=150)
     print(f"Saved figure to '{out_name}'")
+    return fig
+
+
+
+def analyze_pop_size_duration(results, pop_sizes, durations, analysis_freq,
+                              bin_size, freq_window=5):
+    """SNR and z-score of the population firing rate at `analysis_freq` (Hz)
+    for every combination of population size and simulation duration.
+
+    All values are taken from ONE simulation run with save_all_spikes=True:
+    since the neurons are unconnected and receive independent noise, the
+    first n neurons over the first T seconds are statistically equivalent to
+    a separate simulation with pop_size=n and sim_time=T. (The sub-populations
+    and time windows are nested, so neighbouring grid points are correlated.)
+
+    For each (n, T) the spikes are binned into a population rate with
+    `bin_size` (ms), the PSD is computed with return_freq_and_psd and the
+    peak SNR / z-score is read off with calculate_spectral_snr_and_zscore.
+    `pop_sizes` and `durations` (s) must not exceed those of the simulation;
+    choose durations with analysis_freq * T an integer, so the analysis
+    frequency falls exactly on a frequency bin.
+
+    Returns matrices (snr, z_score, mean_rate) of shape
+    (len(pop_sizes), len(durations)); mean_rate is the mean single-neuron
+    firing rate (Hz). Grid points where the SNR cannot be computed are NaN."""
+    E = results["E"]
+    if "all_spike_times" not in E:
+        raise ValueError("results lack per-neuron spikes - rerun "
+                         "run_network_simulation with save_all_spikes=True.")
+    times = np.asarray(E["all_spike_times"])
+    ids = np.asarray(E["all_spike_ids"])
+    if max(pop_sizes) > results["pop_size"]:
+        raise ValueError(f"pop_sizes exceed the simulated pop_size "
+                         f"({results['pop_size']}).")
+
+    shape = (len(pop_sizes), len(durations))
+    snr = np.full(shape, np.nan)
+    z_score = np.full(shape, np.nan)
+    mean_rate = np.full(shape, np.nan)
+
+    for i, n in enumerate(pop_sizes):
+        t_n = times[ids < n]
+        for j, T in enumerate(durations):
+            T_ms = T * 1000.
+            n_bins = int(round(T_ms / bin_size))
+            t_nT = t_n[t_n < T_ms]
+            # Spike times lie on the simulation grid; the small offset keeps
+            # spikes exactly on a bin edge in the bin to its right.
+            idx = np.floor(t_nT / bin_size + 1e-6).astype(np.int64)
+            counts = np.bincount(idx[idx < n_bins], minlength=n_bins)
+            pop_rate = counts / (bin_size / 1000.)  # spikes/s, summed over neurons
+            mean_rate[i, j] = len(t_nT) / T / n
+
+            freqs, psd = return_freq_and_psd(bin_size, pop_rate)
+            try:
+                res = calculate_spectral_snr_and_zscore(
+                    freqs, psd[0], analysis_freq, freq_window=freq_window)
+            except ValueError as e:
+                print(f"n={n}, T={T} s: {e}")
+                continue
+            snr[i, j] = res["snr_peak_ratio"]
+            z_score[i, j] = res["z_score"]
+        print(f"pop size {n:6d}: SNR {np.round(snr[i], 2)}")
+
+    return snr, z_score, mean_rate
+
+
+def _log_levels(matrix, vmin=1.):
+    """1-2-5 log-spaced contour levels from `vmin` up to the largest finite
+    value of `matrix` (at least two levels)."""
+    vmax = np.nanmax(matrix)
+    levels = [m * 10.**k for k in range(int(np.floor(np.log10(vmin))),
+                                         int(np.ceil(np.log10(max(vmax, vmin)))) + 1)
+              for m in (1, 2, 5)]
+    levels = [l for l in levels if vmin <= l]
+    n_keep = next((i + 1 for i, l in enumerate(levels) if l >= vmax), len(levels))
+    return np.array(levels[:max(n_keep, 2)])
+
+
+def plot_pop_size_duration_scan(snr, z_score, pop_sizes, durations,
+                                analysis_freq=20.0, snr_levels=None,
+                                z_score_levels=None,
+                                save_name="pop_size_duration_scan.png"):
+    """Filled contour plots of the firing-rate SNR and z-score at
+    `analysis_freq`, with population size on the (log) x-axis and simulation
+    duration (s) on the (log) y-axis. The matrices are stored as
+    [pop_size, duration], so each is transposed to [duration, pop_size].
+    Contour levels are 1-2-5 log-spaced from 1 up to the data maximum unless
+    given; values below 1 (peak not above the local noise) share the lowest
+    colour."""
+    X, Y = np.meshgrid(pop_sizes, durations)
+
+    if snr_levels is None:
+        snr_levels = np.array([2, 4, 8, 16, 32, 64, 128, 256, 512, 1024])
+    if z_score_levels is None:
+        z_score_levels = np.array([2, 4, 8, 16, 32, 64, 128, 256, 512, 1024])
+
+    fig = plt.figure(figsize=(10, 4.4))
+    fig.subplots_adjust(hspace=0.45, left=0.08, right=0.93, bottom=0.13, top=0.91)
+    ax = fig.add_subplot(1, 2, 1)
+    ax_pop_size = fig.add_subplot(2, 2, 2, xlabel="number of neurons", ylabel="SNR")
+    ax_duration = fig.add_subplot(2, 2, 4, xlabel="duration (s)", ylabel="SNR")
+
+    #fig, axes = plt.subplots(1, 2, figsize=(10, 4.4))
+    fig.subplots_adjust(wspace=0.45, left=0.08, right=0.93, bottom=0.13, top=0.91)
+
+    # for ax, (matrix, title, levels) in zip(axes, panels):
+
+    Z = snr.T
+    if snr_levels is None:
+        snr_levels = _log_levels(Z)
+    # Non-positive values (z-score < 0: no peak) are drawn with the
+    # lowest colour via extend="both".
+    Z_plot = np.where(Z > 0, Z, snr_levels[0] / 10)
+    norm = LogNorm(vmin=snr_levels[0], vmax=snr_levels[-1])
+    cf = ax.contourf(X, Y, Z_plot, levels=snr_levels, norm=norm, cmap="PuBuGn_r",
+                     extend="both")
+    cl = ax.contour(X, Y, Z_plot, levels=snr_levels, colors="k", linewidths=0.4)
+    ax.clabel(cl, fmt="%g", fontsize=9)
+
+    ax.set_xscale("log")
+    ax.set_yscale("log")
+    ax.set_title(f"Firing-rate SNR at {analysis_freq:.0f} Hz")
+    ax.set_xlabel("number of neurons")
+    ax.set_ylabel("simulation duration (s)", labelpad=-2)
+    cbar = fig.colorbar(cf, ax=ax, fraction=0.046, pad=0.04)
+    cbar.set_ticks(snr_levels)
+    cbar.set_ticklabels([f"{l:g}" for l in snr_levels])
+
+    dur_idxs = [-3, -2, -1]
+    for d_, d_idx in enumerate(dur_idxs):
+        duration = durations[d_idx]
+        ax_pop_size.plot(pop_sizes, snr[:, d_idx], label=f"T={duration:.0f} s", c=plt.cm.Grays(0.2 + d_ / 2))
+
+    size_idxs = [-3, -2, -1]
+    for s_, s_idx in enumerate(size_idxs):
+        pop_size = pop_sizes[s_idx]
+        ax_duration.plot(durations, snr[s_idx, :], label=f"N={pop_size:.0f}", c=plt.cm.Grays(0.2 + s_ / 2))
+
+    ax_pop_size.legend(loc="upper left", frameon=False, ncols=1)
+    ax_duration.legend(loc="upper left", frameon=False, ncols=1)
+
+    simplify_axes([ax, ax_pop_size, ax_duration])
+    mark_subplots([ax, ax_pop_size, ax_duration], ypos=1.05)
+    os.makedirs("figures", exist_ok=True)
+    fig.savefig(join("figures", save_name), dpi=150)
+    print(f"Saved figure to '{save_name}'")
     return fig
 
 
@@ -514,5 +676,46 @@ if __name__ == "__main__":
         save_Vm=True,
     )
 
-    results = run_network_simulation(**sim_params)
-    plot_network_results(results, sim_params)
+    run_example = False
+    if run_example:
+        results = run_network_simulation(**sim_params)
+        plot_network_results(results, sim_params, use_welch=False)
+
+    # --- SNR / z-score versus population size and simulation duration --------
+    # One simulation with the largest population and duration; smaller
+    # populations / shorter durations are analysed as subsets of it.
+    pop_sizes = np.array([100, 200, 500,
+                          1000, 2000, 5000, 10000])
+    durations = np.array([1, 2, 5, 10, 20, 50, 100, 200, 500, 1000])  # s
+    scan_params = dict(
+        sim_params,
+        pop_size=int(pop_sizes.max()),
+        sim_time=float(durations.max()) * 1e3,
+        save_Vm=True,
+        save_all_spikes=True,
+        sim_name=f"pop_size_duration_scan_{noise_type}_{noise_level_Vm}_"
+                 f"{target_stim_dVm}_{carrier_f}_{beat_f}_dt{dt}",
+    )
+
+    rerun_analysis = True
+    matrix_path = join("results", "pop_scan", f"{scan_params['sim_name']}_matrices.npz")
+    if rerun_analysis or not os.path.isfile(matrix_path):
+        results = run_network_simulation(**scan_params)
+        # plot_network_results(results, sim_params, use_welch=False)
+        snr, z_score, mean_rate = analyze_pop_size_duration(
+            results, pop_sizes, durations, analysis_freq=beat_f, bin_size=dt)
+        os.makedirs(os.path.dirname(matrix_path), exist_ok=True)
+        np.savez(matrix_path, pop_sizes=pop_sizes, durations=durations,
+                 snr=snr, z_score=z_score, mean_rate=mean_rate,
+                 analysis_freq=beat_f)
+    else:
+        with np.load(matrix_path) as data:
+            pop_sizes = data["pop_sizes"]
+            durations = data["durations"]
+            snr = data["snr"]
+            z_score = data["z_score"]
+        print(f"Loaded scan matrices from '{matrix_path}'")
+
+    plot_pop_size_duration_scan(snr, z_score, pop_sizes, durations,
+                                analysis_freq=beat_f,
+                                save_name=f"{scan_params['sim_name']}.pdf")

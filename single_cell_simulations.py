@@ -370,7 +370,6 @@ def calculate_spectral_snr_and_zscore(
     in_local_window = (freqs >= actual_freq - freq_window) & (freqs <= actual_freq + freq_window)
     in_exclude_window = (freqs >= actual_freq - exclude_window) & (freqs <= actual_freq + exclude_window)
 
-
     # Noise region: inside local window, outside peak exclusion zone
     noise_mask = in_local_window & (~in_exclude_window)
     noise_psd = psd_signal[noise_mask]
@@ -945,7 +944,7 @@ def plot_combined_single_cell_examples(fig_1_list, max_f=2200, tlim=[6, 6.2],
     plt.rcParams["font.family"] = "DejaVu Serif"
     fig = plt.figure(figsize=(13, 13), facecolor="white")
     gs = fig.add_gridspec(len(fig_1_list) + 2, 4, height_ratios=[1.0, 1.0] + [1.] * n, hspace=0.42,
-                          wspace=0.28, left=0.05, right=0.98,
+                          wspace=0.30, left=0.06, right=0.98,
                           top=0.96, bottom=0.04)
 
     ax_vm = fig.add_subplot(gs[0, :])
@@ -964,7 +963,7 @@ def plot_combined_single_cell_examples(fig_1_list, max_f=2200, tlim=[6, 6.2],
         ax_vm_psd = fig.add_subplot(gs[row + 1, :2], xlim=[1, max_f], xlabel="frequency [Hz]",
                                     ylabel=r"PSD [$\mathrm{mV}^2/\mathrm{Hz}$]", ylim=[1e-5, 1e1])
         ax_fr_psd = fig.add_subplot(gs[row + 1, 2:], xlim=[1, max_f], xlabel="frequency [Hz]",
-                                    ylabel=r"PSD [$\mathrm{spikes}^2/\mathrm{Hz}$]", ylim=[1e0, 1e2])
+                                    ylabel=r"PSD [$\mathrm{spikes}^2/\mathrm{Hz}$]", ylim=[1e0, 1e4])
 
         results = run_single_cell_simulation(**sim_params)
 
@@ -1008,7 +1007,7 @@ def plot_combined_single_cell_examples(fig_1_list, max_f=2200, tlim=[6, 6.2],
             vm_z_score = vm_SNR_res['z_score']
             vm_SNR = vm_SNR_res['snr_peak_ratio']
 
-        ax_fr_psd.set_title(f"{sim_name} - PSD of fr: SNR at {stim_freq:.0f} Hz = {fr_SNR:.2f}; z-score = {fr_z_score:.2f}")
+        #ax_fr_psd.set_title(f"{sim_name} - PSD of fr: SNR at {stim_freq:.0f} Hz = {fr_SNR:.2f}; z-score = {fr_z_score:.2f}")
 
         # --- Titles: printed to stdout, NOT drawn on the figure ---------------
         vm_title = f"{sim_name} - Vm: firing rate {results['firing_rate']:.2f} Hz"
@@ -1127,7 +1126,7 @@ def plot_combined_single_cell_examples(fig_1_list, max_f=2200, tlim=[6, 6.2],
         print(f"    (carrier zoom inset on firing-rate PSD: carriers "
               f"{carriers[0]:.0f} & {carriers[-1]:.0f} Hz)")
 
-    mark_subplots(fig.axes, xpos=-0.05, ypos=1.05)
+    mark_subplots(fig.axes, xpos=-0.05, ypos=1.07)
 
     fig.savefig(join(fig_folder, save_name), dpi=150)
     print(f"Saved figure to '{save_name}'")
@@ -1136,19 +1135,46 @@ def plot_combined_single_cell_examples(fig_1_list, max_f=2200, tlim=[6, 6.2],
 
 def plot_compare_Vms(sim_list):
 
-    tlim = [2000, 2200]
-    fig = plt.figure(figsize=[12, 4])
-    ax1 = fig.add_axes([0.07, 0.2, 0.9, 0.5], xlim=tlim, ylim=[-75, -50],
-                          xlabel="time (ms)", ylabel=r"$V_{\rm m}$ (mV)")
+    tlim = [3800, 4200]
 
+    tlim_1 = [3826, 3876]
+    tlim_2 = [4087., 4088.5]
+
+    fig = plt.figure(figsize=[12, 8])
+    fig.subplots_adjust(hspace=0.5, wspace=0.3, left=0.07, right=0.97, top=0.82)
+    ax1 = fig.add_subplot(211, xlim=tlim, ylim=[-71, -49],
+                          xlabel="time (ms)", ylabel=r"$V_{\rm m}$ (mV)")
+    ax2 = fig.add_subplot(223, ylim=[-0.65, 0.65],
+                          xlabel="time (ms)", ylabel=r"difference from 'only noise' (mV)",
+                          xlim=tlim_1)
+    ax3 = fig.add_subplot(224, ylim=[-52, -49.5],
+                          xlabel="time (ms)",  ylabel=r"$V_{\rm m}$ (mV)",
+                          xlim=tlim_2)
     clrs = ["C0", "C1", "C2", "C4"]
 
+    # ax3.axhline(y=-50, c='gray', ls='--')
+
+    ax1.axvspan(tlim_1[0], tlim_1[1], color='pink', alpha=0.2, lw=0)
+    ax1.axvspan(tlim_2[0], tlim_2[1], color='cyan', alpha=0.2, lw=0)
+
+    ax3.set_xticks(np.arange(tlim_2[0], tlim_2[1] + 0.1, 0.5))
+
+    default_Vm = None
     for row, sim_params in enumerate(sim_list):
         results = run_single_cell_simulation(**sim_params)
 
+        if default_Vm is None:
+            default_Vm = results["Vm"]
         t_mask = (results["times"] > tlim[0]) & (results["times"] < tlim[1])
         ax1.plot(results["times"][t_mask], results["Vm"][t_mask],
                  label=sim_params["description"], c=clrs[row], linewidth=2.5 - row/2)
+
+        ax3.plot(results["times"][t_mask], results["Vm"][t_mask],
+                 label=sim_params["description"], c=clrs[row], linewidth=2.5 - row/2)
+
+        if row != 0:
+            ax2.plot(results["times"][t_mask], (results["Vm"] - default_Vm)[t_mask],
+                     c=clrs[row], linewidth=2.5 - row/2)
 
         spikes_mask = (results["spike_times"] > tlim[0]) & (results["spike_times"] < tlim[1])
         for t in results["spike_times"][spikes_mask]:
@@ -1156,8 +1182,10 @@ def plot_compare_Vms(sim_list):
             ax1.plot([t, t], [-48 + row * 3, -46 + row * 3],
                         linestyle="-", linewidth=2., c=clrs[row], clip_on=False)
 
-    ax1.legend(frameon=False, ncol=4, loc=(0.25,-.4))
-    simplify_axes(ax1)
+    ax1.legend(frameon=False, ncol=1, loc=(0.5,0.8))
+    simplify_axes([ax1, ax2, ax3])
+    # mark_subplots(ax1, "A", xpos=-0.05, ypos=1.03)
+    mark_subplots([ax1, ax2, ax3], "ABC", xpos=-0.05, ypos=1.06)
     fig.savefig(join("figures", "vm_compare.pdf"))
 
 
@@ -1177,7 +1205,7 @@ if __name__ == "__main__":
     beat_f = 20.
 
     sim_params_1ABC = dict(
-        sim_time=3000e3,
+        sim_time=5000e3,
         target_stim_dVm=0.0,
         f_values=[beat_f],
         noise_level_Vm=noise_level_Vm,
@@ -1260,7 +1288,7 @@ if __name__ == "__main__":
     )
 
     sim_params_1DEF = dict(
-        sim_time=3000e3,
+        sim_time=5000e3,
         target_stim_dVm=0.3,
         f_values=[beat_f],
         noise_level_Vm=noise_level_Vm,
@@ -1290,7 +1318,7 @@ if __name__ == "__main__":
     )
 
     sim_params_1GHI = dict(
-        sim_time=3000e3,
+        sim_time=5000e3,
         target_stim_dVm=0.3,
         f_values=[carrier_f],
         noise_level_Vm=noise_level_Vm,
@@ -1320,7 +1348,7 @@ if __name__ == "__main__":
     )
 
     sim_params_1JKL = dict(
-        sim_time=3000e3,
+        sim_time=5000e3,
         target_stim_dVm=0.3,
         f_values=[carrier_f, carrier_f + beat_f],
         noise_level_Vm=noise_level_Vm,
@@ -1352,30 +1380,30 @@ if __name__ == "__main__":
     sim_params_list = [sim_params_S1, sim_params_S2, sim_params_S3]
     fig_1_list = [sim_params_1ABC, sim_params_1DEF, sim_params_1GHI, sim_params_1JKL]
 
-    #for sim_params in sim_params_list + fig_1_list:
-    #    results = run_single_cell_simulation(**sim_params)
-    #    if sim_params["sim_name"].startswith("FigS2"):
-    #        tlim = [5, 5.01]
-    #    elif sim_params["sim_name"].startswith("FigS3b"):
-    #        tlim = [5, 5.05]
-    #    else:
-    #        tlim = [5, 6]
-#
+#     for sim_params in fig_1_list:
+#        results = run_single_cell_simulation(**sim_params)
+#        if sim_params["sim_name"].startswith("FigS2"):
+#            tlim = [5, 5.01]
+#        elif sim_params["sim_name"].startswith("FigS3b"):
+#            tlim = [5, 5.05]
+#        else:
+#            tlim = [3.8, 4.2]
+# #
 #        plot_single_cell_results(results, sim_params, use_welch=False,
 #                                 welch_segments=welch_segments, tlim=tlim)
 
 
     for psd_segments in [1, 2, 4, 5, 6, 8, 10, 15, 16]:
-        print("PSD segments: ", psd_segments, "")
-        plot_combined_single_cell_examples(fig_1_list,
-                                           firing_rate_bin_size=dt,
-                                           psd_segments=psd_segments,
-                                           tlim=[2., 2.200],
-                                           save_name=f"Fig1_combined_{psd_segments}psd_segments.png")
-    plot_combined_single_cell_examples(fig_1_list,
-                                       psd_segments=8,
-                                       firing_rate_bin_size=dt,
-                                       tlim=[2.00, 2.2],
-                                       save_name=f"Fig1_combined_{10}psd_segments.pdf")
+       print("PSD segments: ", psd_segments, "")
+       plot_combined_single_cell_examples(fig_1_list,
+                                          firing_rate_bin_size=dt,
+                                          psd_segments=psd_segments,
+                                          tlim=[2., 2.200],
+                                          save_name=f"Fig1_combined_{psd_segments}psd_segments.pdf")
+    # plot_combined_single_cell_examples(fig_1_list,
+    #                                   psd_segments=None,
+    #                                   firing_rate_bin_size=dt,
+    #                                   tlim = [3.800, 4.200],
+    #                                   save_name=f"Fig1_combined_{None}psd_segments.pdf")
 
-    plot_compare_Vms(fig_1_list)
+    # plot_compare_Vms(fig_1_list)
