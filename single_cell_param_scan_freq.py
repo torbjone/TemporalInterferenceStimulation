@@ -38,7 +38,7 @@ from single_cell_param_scan import analyze_firing_rate
 
 
 def run_param_scan(carrier_freqs, beat_freqs, const_params,
-                   firing_rate_bin_size=None, use_welch=False,
+                   firing_rate_bin_size=None, use_welch=False, welch_segments=4,
                    save_dir="results/param_scan_freq"):
     """Run the 2D carrier x beat scan and return (firing_rate, fr_power, fr_SNR).
 
@@ -72,11 +72,12 @@ def run_param_scan(carrier_freqs, beat_freqs, const_params,
                               save_Vm="cut")
 
             results = run_single_cell_simulation(**sim_params)
-            plot_single_cell_results(results, sim_params, fig_folder="param_scan_freq_figs", use_welch=use_welch)
+            plot_single_cell_results(results, sim_params, fig_folder="param_scan_freq_figs",
+                                     use_welch=use_welch, welch_segments=welch_segments)
             # The analysis frequency is this grid point's beat frequency.
             power, snr, snr2 = analyze_firing_rate(
                 results, const_params["sim_time"], beat,
-                use_welch=use_welch,
+                use_welch=use_welch, welch_segments=welch_segments,
                 bin_size=firing_rate_bin_size)
 
             firing_rate[i, j] = results["firing_rate"]
@@ -106,13 +107,13 @@ def plot_param_scan(firing_rate, fr_power, fr_SNR, fr_z_score,
     if snr_levels is None:
         snr_levels = np.arange(20)[::2]
 
-    fr_levels = [3.2, 3.25, 3.3, 3.35, 3.4]
-    fr_psd_levels = np.linspace(0, 1200, 11)
+    fr_levels = np.linspace(3.2, 3.5, 7)#[3.2, 3.25, 3.3, 3.35, 3.4]
+    fr_psd_levels = np.linspace(0, 360, 11)
     #fr_levels = np.arange(110)[::10]
 
-    z_score_levels = np.linspace(0, 300, 11)
+    z_score_levels = np.linspace(0, 150, 11)
 
-    snr_levels = np.linspace(0, 300, 11)
+    snr_levels = np.linspace(0, 50, 11)
 
     # Grid of data coordinates: x = carrier frequency, y = beat frequency. Each
     # matrix is transposed from [carrier, beat] to [beat, carrier] to match
@@ -125,14 +126,14 @@ def plot_param_scan(firing_rate, fr_power, fr_SNR, fr_z_score,
         (firing_rate, "firing rate (Hz)", fr_levels, False, "Hz"),
         (fr_power, "firing-rate power at beat frequency", fr_psd_levels, False, "|firing rate|²/Hz"),
         (fr_SNR, "firing-rate SNR at beat frequency", snr_levels, False, ''),
-        (fr_z_score, "z-score for peak at beat frequency", z_score_levels, False, ''),
+        # (fr_z_score, "z-score for peak at beat frequency", z_score_levels, False, ''),
     ]
 
 
     print(fr_SNR)
 
-    fig, axes = plt.subplots(1, 4, figsize=(16, 4.8))
-    fig.subplots_adjust(wspace=0.4, left=0.04, right=0.98, bottom=0.13, top=0.93)
+    fig, axes = plt.subplots(1, 3, figsize=(16, 4.8))
+    fig.subplots_adjust(wspace=0.4, left=0.04, right=0.95, bottom=0.13, top=0.93)
 
     for ax, (matrix, title, levels, log_scale, label) in zip(axes, panels):
         Z = matrix.T
@@ -168,7 +169,7 @@ def plot_param_scan(firing_rate, fr_power, fr_SNR, fr_z_score,
         ax.plot(2000, 20, '*', c='orange', ms=8)
 
     simplify_axes(list(axes))
-    mark_subplots(list(axes), "EFGH", ypos=1.05)
+    mark_subplots(list(axes), "DEF", ypos=1.05)
     fig.savefig(join("figures", save_name), dpi=150)
     print(f"\nSaved figure to '{save_name}'")
     return fig
@@ -179,10 +180,11 @@ if __name__ == "__main__":
     # beat frequencies are scanned instead.
     dt = 0.025
     noise_type = "ou"
-    use_welch = False
+    use_welch = True
+    welch_segments = 4
     noise_level_Vm = 5.0
     const_params = dict(
-        sim_time=3000e3,
+        sim_time=5000e3,
         target_stim_dVm=0.3,
         noise_level_Vm=noise_level_Vm,
         seed=2,
@@ -201,14 +203,15 @@ if __name__ == "__main__":
     beat_freqs = np.linspace(10, 100, 10)         # Hz
 
     rerun_scan = False
-
+    welch_addon = f"_welch_{welch_segments}" if use_welch else ""
     if rerun_scan:
         firing_rate, fr_power, fr_SNR, fr_z_score = run_param_scan(
-            carrier_freqs, beat_freqs, const_params, use_welch=use_welch)
+            carrier_freqs, beat_freqs, const_params, use_welch=use_welch, welch_segments=welch_segments)
+
 
         # Store the matrices (with their axes) for later reuse.
         os.makedirs("results/param_scan_freq", exist_ok=True)
-        np.savez(f"results/param_scan_freq/param_scan_freq_matrices_dt:{dt}.npz",
+        np.savez(f"results/param_scan_freq/param_scan_freq_matrices_dt:{dt}{welch_addon}.npz",
                  carrier_freqs=carrier_freqs,
                  beat_freqs=beat_freqs,
                  firing_rate=firing_rate,
@@ -217,7 +220,7 @@ if __name__ == "__main__":
                  fr_z_score=fr_z_score,)
     else:
         # Load the matrices (and their axes) from the previously saved scan.
-        matrix_path = f"results/param_scan_freq/param_scan_freq_matrices_dt:{dt}.npz"
+        matrix_path = f"results/param_scan_freq/param_scan_freq_matrices_dt:{dt}{welch_addon}.npz"
         with np.load(matrix_path) as data:
             carrier_freqs = data["carrier_freqs"]
             beat_freqs = data["beat_freqs"]
@@ -230,4 +233,4 @@ if __name__ == "__main__":
     plot_param_scan(firing_rate, fr_power, fr_SNR, fr_z_score,
                     carrier_freqs, beat_freqs,
                     n_levels=6,
-                    save_name=f"param_scan_freq_dt:{dt}.pdf")
+                    save_name=f"param_scan_freq_dt:{dt}{welch_addon}.pdf")

@@ -89,10 +89,11 @@ def run_param_scan(target_stim_dVms, noise_level_Vms, const_params,
                               save_Vm="cut")
 
             results = run_single_cell_simulation(**sim_params)
-            plot_single_cell_results(results,
-                                     sim_params,
-                                     fig_folder="param_scan_figs",
-                                     use_welch=use_welch)
+            # plot_single_cell_results(results,
+            #                          sim_params,
+            #                          fig_folder="param_scan_figs",
+            #                          use_welch=use_welch,
+            #                          welch_segments=welch_segments)
             power, snr, snr2 = analyze_firing_rate(
                 results, const_params["sim_time"], analysis_freq,
                 bin_size=firing_rate_bin_size,  use_welch=use_welch,
@@ -128,9 +129,8 @@ def plot_param_scan(firing_rate, fr_power, fr_SNR, fr_z_score,
     # Log-spaced power levels spanning the data (in decades), since the PSD
     # value at a spectral line scales with the simulation duration.
     fr_pos = np.abs(fr_power[np.isfinite(fr_power) & (fr_power != 0)])
-    fr_levels = np.logspace(np.floor(np.log10(fr_pos.min())),
-                            np.ceil(np.log10(fr_pos.max())), 10)
-    snr_levels =  [5, 10, 20, 40, 80, 160, 320, 640]#np.asarray(snr_levels, dtype=float)
+    fr_levels = 2**np.arange(12)#np.logspace(1, 3, 10)
+    snr_levels =  [2, 4, 8, 16, 32, 64, 128,]#np.asarray(snr_levels, dtype=float)
     z_score_levels = np.logspace(0., 3, 10)
     print(f"z_score_levels: {z_score_levels}")
 
@@ -146,12 +146,11 @@ def plot_param_scan(firing_rate, fr_power, fr_SNR, fr_z_score,
         (firing_rate, "Firing rate (Hz)", n_levels, False, "Hz"),
         (fr_power, f"Firing-rate power at {analysis_freq:.0f} Hz", fr_levels, True, "|firing rate|²/Hz"),
         (fr_SNR, f"Firing-rate SNR at {analysis_freq:.0f} Hz", snr_levels, True, ''),
-        (fr_z_score, "z-score for peak at beat frequency", z_score_levels,True, ''),
-
+        # (fr_z_score, "z-score for peak at beat frequency", z_score_levels,True, ''),
     ]
 
-    fig, axes = plt.subplots(1, 4, figsize=(16, 4.8))
-    fig.subplots_adjust(wspace=0.4, left=0.04, right=0.98, bottom=0.13, top=0.93)
+    fig, axes = plt.subplots(1, 3, figsize=(16, 4.8))
+    fig.subplots_adjust(wspace=0.4, left=0.04, right=0.95, bottom=0.13, top=0.93)
 
     for ax, (matrix, title, levels, log_scale, label) in zip(axes, panels):
         Z = matrix.T
@@ -163,12 +162,12 @@ def plot_param_scan(firing_rate, fr_power, fr_SNR, fr_z_score,
                              extend="both")
             # Overlay labelled contour lines for readability.
             cl = ax.contour(X, Y, np.abs(Z), levels=levels, colors="k", linewidths=0.4, extend="both")
-            ax.clabel(cl, fmt="%g", fontsize=10)
+            ax.clabel(cl, fontsize=10)
         else:
             cf = ax.contourf(X, Y, Z, levels=levels, cmap="PuBuGn_r")
 
             cl = ax.contour(X, Y, Z, levels=levels, colors="k", linewidths=0.4)
-            ax.clabel(cl, fmt="%g", fontsize=10)
+            ax.clabel(cl, fontsize=10)
 
         ax.set_title(title)
         ax.set_xlabel("noise level Vm (mV)")
@@ -176,7 +175,7 @@ def plot_param_scan(firing_rate, fr_power, fr_SNR, fr_z_score,
         if log_scale:
            cbar = fig.colorbar(cf, ax=ax, fraction=0.046, pad=0.04)
            cbar.set_ticks(levels)
-           cbar.set_ticklabels([f"{l:.3g}" for l in levels])
+           cbar.set_ticklabels([f"{l}" for l in levels])
 
         else:
            cbar = fig.colorbar(cf, ax=ax, fraction=0.046, pad=0.04, label="")
@@ -199,7 +198,7 @@ if __name__ == "__main__":
     noise_type = "ou"
     # Parameters held constant across the scan.
     const_params = dict(
-        sim_time=3000e3,
+        sim_time=5000e3,
         f_values=[carrier_freq, carrier_freq + analysis_freq],
         seed=2,
         V_th=-50.,
@@ -214,11 +213,12 @@ if __name__ == "__main__":
 
     # Scanned axes:
     target_stim_dVms = np.linspace(0, 1, 11)   # mV
-    noise_level_Vms = np.linspace(3, 9, 13)    # mV
+    noise_level_Vms = np.linspace(3, 15, 25)   # mV
 
     rerun_scan = True
-    welch_segments = 8
-    use_welch = False
+    welch_segments = 4
+    use_welch = True
+    welch_addon = f"_welch_{welch_segments}" if use_welch else ""
 
     if rerun_scan:
         firing_rate, fr_power, fr_SNR, fr_z_score = run_param_scan(
@@ -227,7 +227,7 @@ if __name__ == "__main__":
 
         # Store the matrices (with their axes) for later reuse.
         os.makedirs("results/param_scan", exist_ok=True)
-        np.savez(f"results/param_scan/param_scan_matrices_welch:{use_welch}:{welch_segments}_dt{dt}.npz",
+        np.savez(f"results/param_scan/param_scan_matrices_dt{dt}{welch_addon}.npz",
                  target_stim_dVms=target_stim_dVms,
                  noise_level_Vms=noise_level_Vms,
                  firing_rate=firing_rate,
@@ -237,7 +237,7 @@ if __name__ == "__main__":
                  fr_z_score=fr_z_score,)
     else:
         # Load the matrices (and their axes) from the previously saved scan.
-        matrix_path = f"results/param_scan/param_scan_matrices_welch:{use_welch}:{welch_segments}_dt{dt}.npz"
+        matrix_path = f"results/param_scan/param_scan_matrices_dt{dt}{welch_addon}.npz"
         with np.load(matrix_path) as data:
             target_stim_dVms = data["target_stim_dVms"]
             noise_level_Vms = data["noise_level_Vms"]
@@ -251,4 +251,4 @@ if __name__ == "__main__":
     plot_param_scan(firing_rate, fr_power, fr_SNR, fr_z_score,
                     target_stim_dVms, noise_level_Vms,
                     analysis_freq=analysis_freq,
-                    save_name=f"param_scan_welch:{use_welch}:{welch_segments}_dt{dt}.pdf")
+                    save_name=f"param_scan_dt{dt}{welch_addon}.pdf")

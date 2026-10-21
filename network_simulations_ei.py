@@ -85,6 +85,7 @@ def run_network_simulation(pop_size=100,
                            resolution=0.1,
                            sim_name="network_ei_test",
                            save_dir="results",
+                           noise_type="gaussian",
                            force_rerun=False,
                            save_Vm=True):
     """Simulate the (E, I) -> B feed-forward network and return a results dict.
@@ -179,6 +180,16 @@ def run_network_simulation(pop_size=100,
         "sim_name": sim_name,
         "save_Vm": save_Vm,
     }
+
+
+    if noise_type == "ou":
+        # Only added for OU noise so existing (gaussian) cache files remain valid.
+        params.update({"noise_type": noise_type, "tau_ou": tau_ou,
+                       "neuron_model": "iaf_psc_exp"})
+    elif noise_type != "gaussian":
+        raise ValueError(f"Unknown noise_type '{noise_type}'. "
+                         f"Must be 'gaussian' or 'ou'.")
+
 
     save_path = os.path.join(save_dir, f"{sim_name}.pkl")
 
@@ -657,7 +668,7 @@ def plot_network_results(results, sim_params, tlim=[5, 6], max_f=2000,
 if __name__ == "__main__":
 
     weight_factor = 4.3
-    target_stim_dVm = 0.06
+    target_stim_dVm = 0.3
     dt = 0.025
     carrier_f = 2000
     beat_f = 20
@@ -666,7 +677,7 @@ if __name__ == "__main__":
         pop_size=10000,
         exc_fraction=0.8,
         inh_weight_factor=4.0,
-        sim_time=1000e3,
+        sim_time=10e3,
         f_values=[carrier_f, carrier_f + beat_f],
         target_stim_dVm=target_stim_dVm,
         noise_level_Vm=4.0,
@@ -686,6 +697,7 @@ if __name__ == "__main__":
         resolution=dt,
         n_threads=4,
         sim_name=f"network_ei_test_{target_stim_dVm}_{weight_factor}_{carrier_f}_{beat_f}",
+        noise_type="gaussian",
         force_rerun=False,
         save_Vm=True,
     )

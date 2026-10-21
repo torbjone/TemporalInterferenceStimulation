@@ -61,8 +61,9 @@ def run_demo(input_freq=1000.0, input_rate=15.0, input_ampl=10.0, n_inputs=100,
              weight=15.0, tau_syn=2.0, tau_m=10.0, C=100.0, noise_level_Vm=1.0,
              T=20e3, dt=0.1, seed=2, nperseg=16384, save_name=None):
     rng = np.random.default_rng(seed)
-    fs = 1000.0 / dt                       # sampling rate (Hz)
 
+    fs = 1000.0 / dt                       # sampling rate (Hz)
+    max_freq = 2200
     # --- 1. Synaptic input: summed Poisson counts with rate locked to input_freq
     t = np.arange(0, T, dt)                                  # ms
     rate_t = input_rate + input_ampl * np.sin(2 * np.pi * input_freq * t / 1000.0)
@@ -107,7 +108,7 @@ def run_demo(input_freq=1000.0, input_rate=15.0, input_ampl=10.0, n_inputs=100,
         snr = compute_SNR(f, p, input_freq)
         print(f"  {title:32s}: SNR = {snr:.3g}")
 
-        m = f < min(2 * input_freq, fs / 2)
+        m = (1 <= f) & (f <= max_freq)
         ax = axes[0, col]
         ax.loglog(f[m], p[m], 'k', lw=0.8)
         ax.axvline(input_freq, lw=0.6, ls='--', color='gray')
@@ -131,4 +132,4 @@ def run_demo(input_freq=1000.0, input_rate=15.0, input_ampl=10.0, n_inputs=100,
 
 
 if __name__ == "__main__":
-    run_demo()
+    run_demo(input_freq = 2000, noise_level_Vm=0.5, dt=0.025, T=100e3)

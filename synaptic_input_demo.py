@@ -359,6 +359,8 @@ def plot_synaptic_input_results(results, sim_params,
 if __name__ == "__main__":
 
     dt = 0.025
+    noise_level_Vm = 1.0
+    tau_syn = 0.1
     sim_params = dict(
         sim_time=100e3,
         input_freq=2000.0,
@@ -367,16 +369,16 @@ if __name__ == "__main__":
         n_inputs=50,
         syn_weight=22.0,
         syn_delay=1.5,
-        tau_syn=0.1,
-        noise_level_Vm=0.0,
+        tau_syn=tau_syn,
+        noise_level_Vm=noise_level_Vm,
         C=100,
         V_th=-40.,
         E_m=-60.,
         tau_m=10,
         seed=2,
         resolution=dt,
-        sim_name="synaptic_demo_no_spikes_noise2",
-        force_rerun=False,
+        sim_name=f"synaptic_demo_noise:{noise_level_Vm}_tau_syn:{tau_syn}_no_spikes",
+        force_rerun=True,
         save_Vm=True,
     )
 
