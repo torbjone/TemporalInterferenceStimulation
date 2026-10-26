@@ -19,6 +19,7 @@ only step 4, adding noise with a shallower spectrum, that raises the local
 floor at input_freq enough to bury the peak.
 """
 
+from os.path import join
 import numpy as np
 import matplotlib.pyplot as plt
 from scipy.signal import welch, lfilter
@@ -125,7 +126,7 @@ def run_demo(input_freq=1000.0, input_rate=15.0, input_ampl=10.0, n_inputs=100,
 
     simplify_axes(list(axes.ravel()))
     if save_name is None:
-        save_name = f"demo_filtering_{int(input_freq)}Hz.png"
+        save_name = join("figures", f"demo_filtering_{int(input_freq)}Hz.png")
     fig.savefig(save_name, dpi=150)
     print(f"\nSaved figure to '{save_name}'")
     return fig

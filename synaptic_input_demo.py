@@ -1,26 +1,30 @@
 """Toy demo: a single iaf_psc_alpha neuron driven by synaptic input whose
-rate is locked to a given frequency.
+rate is locked to two frequencies (by default 20 Hz and 2000 Hz).
 
-The presynaptic input is a sinusoidal_poisson_generator, i.e. an inhomogeneous
-Poisson process with instantaneous rate
+Each input frequency f has its own sinusoidal_poisson_generator, i.e. an
+inhomogeneous Poisson process with instantaneous rate
 
-    r(t) = input_rate + input_ampl * sin(2*pi * input_freq * t),
+    r(t) = input_rate + input_ampl * sin(2*pi * f * t),
 
-so the *rate* of the synaptic input is grid-/phase-locked to `input_freq`. The
-generator drives `n_inputs` parrot_neurons (each relaying one independent
-realisation of that modulated process), and every parrot projects onto the
-single postsynaptic neuron. Recording the parrots therefore gives exactly the
-synaptic input spike train the neuron receives.
+relayed by `n_inputs` parrot_neurons (one independent realisation each).
 
-Plotted (mirroring plot_single_cell_results):
-    - the membrane potential trace (with spikes),
-    - the PSD of the membrane potential,
-    - the PSD of the neuron's firing rate,
-    - the PSD of the synaptic input rate,
-each spectrum shown full-band and zoomed around `input_freq`, annotated with
-its SNR there.
+The input spike trains are generated ONCE (generate_input_spike_trains) and
+replayed through spike_generators in every simulation, so the synaptic input
+times are identical across all cases. The cases are:
 
-Results are cached to a pickle file exactly as in run_single_cell_simulation.
+    reference : very fast synapses, single fixed delay, no Vm noise, no spikes
+    tau_syn   : realistic synaptic time constant
+    delay_std : 1 ms std on the synaptic delays
+    Vm noise  : 1 mV std noise on the membrane potential
+    spikes    : spike threshold lowered to -50 mV (occasional spikes)
+
+each differing from the reference by exactly one modification.
+
+Plotted: the Vm traces of all cases in one panel (top row), and for each case
+the PSD of the synaptic input current (left) and of the membrane potential
+(right).
+
+Results are cached to pickle files exactly as in run_single_cell_simulation.
 """
 
 import os
@@ -32,94 +36,183 @@ from scipy.signal import welch
 
 from single_cell_simulations import (
     find_noise_std,
-    find_spike_rate,
-    return_freq_and_psd,
     calculate_spectral_snr_and_zscore,
     simplify_axes,
 )
 
+CUTOFF = 1000  # ms of initial transient discarded from the recordings
 
-def run_synaptic_input_simulation(sim_time=10e3,
-                                  input_freq=20.0,
-                                  input_rate=15.0,
-                                  input_ampl=10.0,
-                                  n_inputs=100,
-                                  syn_weight=15.0,
-                                  syn_delay=1.5,
+
+def _load_cache(save_path, params, force_rerun):
+    """Return cached results from `save_path` if they were produced with
+    `params`, otherwise None."""
+    if force_rerun or not os.path.isfile(save_path):
+        return None
+    try:
+        with open(save_path, "rb") as f:
+            saved = pickle.load(f)
+    except (pickle.UnpicklingError, EOFError, ValueError) as e:
+        # A truncated/corrupt cache file (e.g. an interrupted write from a
+        # previous run) - discard it and rerun.
+        print(f"Could not load saved results from '{save_path}' ({e}) - rerunning.")
+        return None
+    if saved.get("params") == params:
+        print(f"Loading saved results from '{save_path}'")
+        return saved["results"]
+    print(f"Saved parameters in '{save_path}' differ from the requested "
+          f"parameters - rerunning.")
+    return None
+
+
+def _save_cache(save_path, params, results):
+    """Atomically pickle `params` and `results` to `save_path`."""
+    os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
+    tmp_path = save_path + ".tmp"
+    with open(tmp_path, "wb") as f:
+        pickle.dump({"params": params, "results": results}, f)
+    os.replace(tmp_path, save_path)
+    print(f"Saved results to '{save_path}'")
+
+
+def generate_input_spike_trains(sim_time=10e3,
+                                input_freqs=(20.0, 2000.0),
+                                input_rate=10.0,
+                                input_ampl=1.0,
+                                n_inputs=50,
+                                seed=2,
+                                resolution=0.1,
+                                sim_name="synaptic_demo_inputs",
+                                save_dir="results",
+                                force_rerun=False):
+    """Generate the frequency-locked presynaptic spike trains once.
+
+    For every frequency in `input_freqs` a sinusoidal_poisson_generator drives
+    `n_inputs` parrot_neurons, whose spikes are recorded over the full
+    simulation (including the initial `CUTOFF` transient). Returns a dict
+    with the list of spike-time arrays (ms, one per presynaptic input) and the
+    input frequency each input is locked to. These trains are replayed in
+    run_synaptic_input_simulation, so all simulations receive identical input.
+    """
+    params = {
+        "sim_time": sim_time,
+        "input_freqs": tuple(input_freqs),
+        "input_rate": input_rate,
+        "input_ampl": input_ampl,
+        "n_inputs": n_inputs,
+        "seed": seed,
+        "resolution": resolution,
+        "cutoff": CUTOFF,
+    }
+    save_path = os.path.join(save_dir, f"{sim_name}.pkl")
+    cached = _load_cache(save_path, params, force_rerun)
+    if cached is not None:
+        return cached
+
+    import nest
+
+    nest.ResetKernel()
+    nest.verbosity = nest.VerbosityLevel.WARNING
+    nest.SetKernelStatus({"resolution": resolution})
+    nest.rng_seed = seed
+
+    recorders = []
+    for f in input_freqs:
+        spg = nest.Create("sinusoidal_poisson_generator", params={
+            "rate": input_rate,
+            "amplitude": input_ampl,
+            "frequency": f,
+            "phase": 0.0,
+        })
+        parrots = nest.Create("parrot_neuron", n_inputs)
+        nest.Connect(spg, parrots)  # all_to_all, independent trains per parrot
+        rec = nest.Create("spike_recorder")
+        nest.Connect(parrots, rec)
+        recorders.append((parrots, rec))
+
+    nest.Simulate(sim_time + CUTOFF + 1)
+
+    spike_trains, train_freqs = [], []
+    for f, (parrots, rec) in zip(input_freqs, recorders):
+        ev = rec.get("events")
+        for gid in parrots.tolist():
+            spike_trains.append(np.sort(ev["times"][ev["senders"] == gid]))
+            train_freqs.append(f)
+
+    results = {"spike_trains": spike_trains, "train_freqs": np.array(train_freqs)}
+    _save_cache(save_path, params, results)
+    return results
+
+
+def run_synaptic_input_simulation(inputs,
+                                  input_params,
+                                  sim_time=10e3,
+                                  syn_weight=12.0,
+                                  syn_delay=3.0,
+                                  syn_delay_std=0.0,
                                   tau_syn=2.0,
                                   tau_syn_ref=2.0,
                                   conserve_charge=True,
                                   noise_level_Vm=0.0,
                                   C=100,
-                                  V_th=-50.0,
+                                  V_th=0.0,
                                   E_m=-60.0,
                                   tau_m=10,
                                   seed=2,
                                   resolution=0.1,
                                   sim_name="synaptic_demo",
                                   save_dir="results",
-                                  force_rerun=False,
-                                  save_Vm=True):
-    """Simulate a single neuron driven by frequency-locked synaptic input.
+                                  force_rerun=False):
+    """Simulate a single neuron driven by the pre-generated input trains.
 
     Parameters
     ----------
+    inputs : dict
+        Output of generate_input_spike_trains. Each spike train is replayed by
+        its own spike_generator, so input times are identical across runs.
+    input_params : dict
+        Parameters passed to generate_input_spike_trains (only used to verify
+        cached results).
     sim_time : float
-        Simulation time (ms), excluding the initial `cutoff` transient.
-    input_freq : float
-        Frequency (Hz) the synaptic input rate is locked to.
-    input_rate : float
-        Mean (DC) rate (spikes/s) of each presynaptic Poisson process.
-    input_ampl : float
-        Modulation amplitude (spikes/s) of the presynaptic rate at input_freq.
-        Kept <= input_rate so the instantaneous rate stays non-negative.
-    n_inputs : int
-        Number of presynaptic parrot_neurons (independent realisations of the
-        common modulated rate) projecting onto the neuron.
+        Simulation time (ms), excluding the initial `CUTOFF` transient. Must
+        match the duration the input trains were generated for.
     syn_weight : float
         Weight (pA) of every input -> neuron synapse, interpreted at the
         reference time constant `tau_syn_ref` (see `conserve_charge`).
     syn_delay : float
-        Synaptic delay (ms) of the input -> neuron connections. A single value
-        shared by all synapses (no delay distribution).
+        Mean synaptic delay (ms) of the input -> neuron connections.
+    syn_delay_std : float
+        Standard deviation (ms) of the synaptic delays. 0 gives a single
+        delay shared by all synapses. Delays are drawn (numpy, seeded by
+        `seed`) from a normal distribution, clipped at `resolution` and
+        rounded to the simulation grid.
     tau_syn : float
-        Alpha-current synaptic time constant (ms) of the neuron's incoming
-        excitatory synapses (tau_syn_ex).
+        Alpha-current synaptic time constant (ms) (tau_syn_ex).
     tau_syn_ref : float
         Reference synaptic time constant (ms) at which `syn_weight` is defined.
         Only used when `conserve_charge=True`.
     conserve_charge : bool
-        If True, compensate the weight so the total charge per synaptic event
-        (proportional to weight * tau_syn) is independent of `tau_syn`:
-        w_eff = syn_weight * tau_syn_ref / tau_syn. In NEST's iaf_psc_alpha the
-        weight sets the PSC *peak* while the PSC *integral* scales with
-        tau_syn, so this keeps the mean current into the cell (hence mean Vm
-        and firing rate) unchanged as `tau_syn` is varied, isolating the
-        synaptic low-pass filtering effect. If False, `syn_weight` is used as
-        given (constant PSC peak, tau-dependent mean drive).
+        If True, use w_eff = syn_weight * tau_syn_ref / tau_syn so the charge
+        per synaptic event (proportional to weight * tau_syn in
+        iaf_psc_alpha) - and hence the mean drive - is independent of
+        `tau_syn`, isolating the synaptic low-pass filtering effect.
     noise_level_Vm : float
-        Optional Vm-noise standard deviation (mV) added to the neuron via a
-        noise_generator (0 disables it).
+        Vm-noise standard deviation (mV) added via a noise_generator
+        (0 disables it).
     C, V_th, E_m, tau_m : float
         Neuron parameters, as in run_single_cell_simulation.
     seed : int
-        Master seed for the NEST kernel.
+        Seed for the NEST kernel (Vm noise) and for the delay distribution.
     resolution : float
         Simulation time step (ms).
-    sim_name, save_dir, force_rerun, save_Vm
+    sim_name, save_dir, force_rerun
         Caching / output controls, as in run_single_cell_simulation.
     """
-
-    # All input parameters that define the simulation. Saved together with the
-    # results so that a cached run can be verified against the current request.
     params = {
+        "input_params": input_params,
         "sim_time": sim_time,
-        "input_freq": input_freq,
-        "input_rate": input_rate,
-        "input_ampl": input_ampl,
-        "n_inputs": n_inputs,
         "syn_weight": syn_weight,
         "syn_delay": syn_delay,
+        "syn_delay_std": syn_delay_std,
         "tau_syn": tau_syn,
         "tau_syn_ref": tau_syn_ref,
         "conserve_charge": conserve_charge,
@@ -131,30 +224,11 @@ def run_synaptic_input_simulation(sim_time=10e3,
         "seed": seed,
         "resolution": resolution,
         "sim_name": sim_name,
-        "save_Vm": save_Vm,
     }
-
     save_path = os.path.join(save_dir, f"{sim_name}.pkl")
-
-    # Try to load a previous run instead of simulating again.
-    if not force_rerun and os.path.isfile(save_path):
-        try:
-            with open(save_path, "rb") as f:
-                saved = pickle.load(f)
-        except (pickle.UnpicklingError, EOFError, ValueError) as e:
-            # A truncated/corrupt cache file (e.g. an interrupted write from a
-            # previous run) - discard it and rerun the simulation.
-            print(f"Could not load saved results from '{save_path}' ({e}) - "
-                  f"rerunning simulation.")
-            saved = None
-
-        if saved is not None:
-            if saved.get("params") == params:
-                print(f"Loading saved results from '{save_path}'")
-                return saved["results"]
-
-            print(f"Saved parameters in '{save_path}' differ from the requested "
-                  f"parameters - rerunning simulation.")
+    cached = _load_cache(save_path, params, force_rerun)
+    if cached is not None:
+        return cached
 
     import nest
 
@@ -162,8 +236,6 @@ def run_synaptic_input_simulation(sim_time=10e3,
     nest.verbosity = nest.VerbosityLevel.WARNING
     nest.SetKernelStatus({"resolution": resolution})
     nest.rng_seed = seed
-
-    cutoff = 1000  # ms of initial transient discarded from the recordings
 
     # --- Postsynaptic neuron --------------------------------------------------
     neuron = nest.Create("iaf_psc_alpha", params={
@@ -177,26 +249,23 @@ def run_synaptic_input_simulation(sim_time=10e3,
         "tau_syn_ex": tau_syn,
     })
 
-    # --- Frequency-locked synaptic input --------------------------------------
-    # sinusoidal_poisson_generator: instantaneous rate = rate + amplitude*sin,
-    # so the input rate is locked to `input_freq`. With individual_spike_trains
-    # (the default) each target parrot relays its own realisation of that rate.
-    spg = nest.Create("sinusoidal_poisson_generator", params={
-        "rate": input_rate,
-        "amplitude": input_ampl,
-        "frequency": input_freq,
-        "phase": 0.0,
-    })
-    parrots = nest.Create("parrot_neuron", n_inputs)
-    nest.Connect(spg, parrots)  # all_to_all, independent trains per parrot
+    # --- Replayed synaptic input ----------------------------------------------
+    spike_trains = inputs["spike_trains"]
+    n_syn = len(spike_trains)
+    sgs = nest.Create("spike_generator", n_syn)
+    sgs.set([{"spike_times": st} for st in spike_trains])
 
-    # Charge-conserving weight: the alpha-PSC integral scales with tau_syn (its
-    # peak equals the weight), so scaling the weight by tau_syn_ref/tau_syn
-    # keeps the per-event charge - and thus the mean drive - fixed as tau_syn
-    # is varied, isolating the synaptic low-pass filtering effect.
+    if syn_delay_std > 0:
+        rng = np.random.default_rng(seed)
+        delays = rng.normal(syn_delay, syn_delay_std, n_syn)
+    else:
+        delays = np.full(n_syn, float(syn_delay))
+    delays = np.round(np.maximum(delays, resolution) / resolution) * resolution
+
     syn_weight_eff = syn_weight * tau_syn_ref / tau_syn if conserve_charge else syn_weight
-    nest.Connect(parrots, neuron,
-                 syn_spec={"weight": syn_weight_eff, "delay": syn_delay})
+    nest.Connect(sgs, neuron, "all_to_all",
+                 syn_spec={"weight": syn_weight_eff,
+                           "delay": delays.reshape(1, n_syn)})
 
     # --- Optional membrane noise ----------------------------------------------
     if noise_level_Vm > 0:
@@ -209,148 +278,116 @@ def run_synaptic_input_simulation(sim_time=10e3,
 
     # --- Recorders ------------------------------------------------------------
     multimeter = nest.Create("multimeter", params={
-        "interval": resolution, "record_from": ["V_m"], "start": cutoff})
-    spike_recorder = nest.Create("spike_recorder", params={"start": cutoff})
-    input_recorder = nest.Create("spike_recorder", params={"start": cutoff})
-
+        "interval": resolution, "record_from": ["V_m", "I_syn_ex"], "start": CUTOFF})
+    spike_recorder = nest.Create("spike_recorder", params={"start": CUTOFF})
     nest.Connect(multimeter, neuron)
     nest.Connect(neuron, spike_recorder)
-    nest.Connect(parrots, input_recorder)  # the synaptic input spike train
 
     # --- Simulate -------------------------------------------------------------
-    nest.Simulate(sim_time + cutoff + 1)
+    nest.Simulate(sim_time + CUTOFF + 1)
 
-    ts = np.sort(spike_recorder.get("events")["times"] - cutoff)
-    input_ts = np.sort(input_recorder.get("events")["times"] - cutoff)
+    ts = np.sort(spike_recorder.get("events")["times"] - CUTOFF)
+    events = multimeter.get("events")
+    V_m = events["V_m"]
 
     results = {
-        "input_freq": input_freq,
-        "input_rate": input_rate,
-        "input_ampl": input_ampl,
-        "n_inputs": n_inputs,
         "tau_syn": tau_syn,
         "syn_weight_eff": syn_weight_eff,
+        "delays": delays,
         "spike_times": ts,
         "firing_rate": len(ts) / sim_time * 1000,
-        "input_spike_times": input_ts,
         "noise_level_Vm": noise_level_Vm,
         "I_noise": I_noise,
+        "Vm": V_m,
+        "I_syn": events["I_syn_ex"],
+        "times": np.arange(len(V_m)) * resolution,
     }
-    if save_Vm:
-        V_m = multimeter.get("events")["V_m"]
-        results["Vm"] = V_m
-        results["times"] = np.arange(len(V_m)) * resolution
-
-    # --- Save (atomic) --------------------------------------------------------
-    os.makedirs(save_dir, exist_ok=True)
-    tmp_path = save_path + ".tmp"
-    with open(tmp_path, "wb") as f:
-        pickle.dump({"params": params, "results": results}, f)
-    os.replace(tmp_path, save_path)
-    print(f"Saved results to '{save_path}'")
+    _save_cache(save_path, params, results)
     return results
 
 
-def plot_synaptic_input_results(results, sim_params,
-                                tlim=[0.5, 1.0], max_f=3200,
-                                firing_rate_bin_size=0.1, input_bin_size=0.1,
-                                welch_segments=8):
-    """Plot the membrane-potential trace and the PSDs of the membrane
-    potential, the firing rate, and the synaptic input rate.
+def plot_synaptic_input_results(case_results, input_freqs, resolution,
+                                fig_name, tlim=(1.0, 2.0), max_f=5000,
+                                welch_segments=8, snr_window=5):
+    """Plot the Vm traces of all cases in the top row, and below one row per
+    case with the PSD of the synaptic input current (left) and the membrane
+    potential (right). The reference case (first entry) is drawn in light
+    gray behind every other case for comparison.
 
-    Each spectrum is shown full-band (log-log) and zoomed around `input_freq`,
-    annotated with its SNR and z-score there. `tlim` is the time window (s)
-    shown for the Vm trace; `max_f` the upper frequency (Hz) of the full
-    spectra. PSDs are computed with Welch's method using `welch_segments`
-    segments (50% overlap); set `welch_segments=None` to use a single
-    full-length FFT instead. The Vm panels require the simulation to have been
-    run with save_Vm=True."""
-    V_th = sim_params["V_th"]
-    sim_name = sim_params["sim_name"]
-    sim_time = sim_params["sim_time"]
-    resolution = sim_params["resolution"]
-    input_freq = sim_params["input_freq"]
+    `case_results` is a list of (label, results) tuples; `tlim` the time
+    window (s) of the Vm traces; `max_f` the upper frequency (Hz) of the PSDs,
+    which are computed with Welch's method using `welch_segments` segments
+    (50% overlap). Each PSD panel is annotated with the SNR (peak power over
+    the local median noise floor within +-`snr_window` Hz) at every input
+    frequency."""
+    colors = ["k", "tab:blue", "tab:orange", "tab:green", "tab:red",
+              "tab:purple", "tab:brown"]
 
-    have_vm = "Vm" in results
-
-    # --- Spectra --------------------------------------------------------------
-    def _psd(sig, dt_ms):
-        """PSD of `sig` sampled every `dt_ms` ms (Welch, or a single FFT if
-        welch_segments is None)."""
-        if welch_segments is None:
-            freqs, psd = return_freq_and_psd(dt_ms, sig)
-            return freqs, psd[0]
+    def _psd(sig):
         nperseg = len(sig) // welch_segments
-        return welch(sig, fs=1000. / dt_ms, nperseg=nperseg, noverlap=nperseg // 2)
+        freqs, psd = welch(sig, fs=1000. / resolution,
+                           nperseg=nperseg, noverlap=nperseg // 2)
+        mask = (freqs > 0) & (freqs < max_f)
+        return freqs[mask], psd[mask]
 
-    def _snr(freqs, psd):
-        return calculate_spectral_snr_and_zscore(freqs, psd, input_freq, freq_window=5)
+    psds = [(_psd(res["I_syn"]), _psd(res["Vm"])) for _, res in case_results]
 
-    # Neuron firing rate.
-    spike_rate, _ = find_spike_rate(results["spike_times"], firing_rate_bin_size, sim_time)
-    freqs_fr, psd_fr = _psd(spike_rate, firing_rate_bin_size)
-    snr_fr = _snr(freqs_fr, psd_fr)
-
-    # Synaptic input rate (pooled parrot spikes -> rate -> PSD).
-    in_rate, _ = find_spike_rate(results["input_spike_times"], input_bin_size, sim_time)
-    freqs_in, psd_in = _psd(in_rate, input_bin_size)
-    snr_in = _snr(freqs_in, psd_in)
-
-    # Membrane potential.
-    if have_vm:
-        freqs_vm, psd_vm = _psd(results["Vm"], resolution)
-        snr_vm = _snr(freqs_vm, psd_vm)
-
+    n_cases = len(case_results)
     plt.close("all")
-    fig = plt.figure(figsize=(13, 10))
-    gs = fig.add_gridspec(3, 3, hspace=0.6, wspace=0.35,
-                          left=0.07, right=0.98, top=0.94, bottom=0.07)
+    fig = plt.figure(figsize=(11, 2.0 * (n_cases + 1)))
+    gs = fig.add_gridspec(n_cases + 1, 2, hspace=0.7, wspace=0.25,
+                          left=0.08, right=0.98, top=0.95, bottom=0.05)
 
-    # --- Membrane-potential trace (spans all columns) -------------------------
-    ax_vm = fig.add_subplot(
-        gs[0, :], xlabel="time (s)", ylabel=r"$V_{\rm m}$ (mV)",
-        title=(r"Single neuron, synaptic input rate locked to {0:.0f} Hz - "
-               r"firing rate: {1:.2f} Hz".format(input_freq, results["firing_rate"])))
-    if have_vm:
-        ax_vm.plot(results["times"] / 1000, results["Vm"], 'k', lw=0.7)
-        ax_vm.set_xlim(tlim)
-    for t in results["spike_times"]:
-        ax_vm.vlines(x=t / 1000, ymin=V_th, ymax=V_th + 5, color="r")
+    # --- Top row: Vm of all cases ---------------------------------------------
+    ax_vm = fig.add_subplot(gs[0, :], xlabel="time (s)", ylabel=r"$V_{\rm m}$ (mV)",
+                            xlim=tlim,
+                            title="Membrane potential, identical synaptic input "
+                                  "(locked to " +
+                                  " and ".join(f"{f:.0f} Hz" for f in input_freqs) + ")")
+    for i, (label, res) in enumerate(case_results):
+        t = res["times"] / 1000
+        m = (t >= tlim[0]) & (t <= tlim[1])
+        ax_vm.plot(t[m], res["Vm"][m], color=colors[i], lw=0.7,
+                   label=f"{label} ({res['firing_rate']:.2f} Hz)")
+        sp = res["spike_times"] / 1000
+        sp = sp[(sp >= tlim[0]) & (sp <= tlim[1])]
+        if len(sp):
+            ymax = ax_vm.get_ylim()[1]
+            ax_vm.vlines(sp, ymax - 2, ymax, color=colors[i], lw=1.5)
+    ax_vm.legend(fontsize=7, frameon=False, ncol=n_cases, loc="lower center",
+                 bbox_to_anchor=(0.5, 1.12))
 
-    # --- PSD panels: full log-log (row 1) + zoom (row 2) ----------------------
-    def _plot_psd(col, freqs, psd, snr, ylabel, title, zoom_factor):
-        mask = freqs < max_f
-        arg = np.argmin(np.abs(freqs - input_freq))
+    # --- PSD rows -------------------------------------------------------------
+    for i, (label, _) in enumerate(case_results):
+        for col, (name, unit) in enumerate([("Synaptic input current", r"pA$^2$/Hz"),
+                                            ("Membrane potential", r"mV$^2$/Hz")]):
+            ax = fig.add_subplot(gs[i + 1, col], xlim=[1, max_f],
+                                 ylabel=unit, title=f"{name}: {label}")
+            if i == n_cases - 1:
+                ax.set_xlabel("frequency (Hz)")
+            for f in input_freqs:
+                ax.axvline(f, lw=0.5, ls="--", color="gray")
+            if i > 0:
+                f_ref, p_ref = psds[0][col]
+                ax.loglog(f_ref, p_ref, color="0.75", lw=1.0, label=case_results[0][0])
+            freqs, psd = psds[i][col]
+            ax.loglog(freqs, psd, color=colors[i], lw=0.8, label=label)
+            if i > 0:
+                ax.legend(fontsize=7, frameon=False, loc="lower left")
 
-        ax_full = fig.add_subplot(gs[1, col], xlim=[1, max_f],
-                                  xlabel="frequency (Hz)", ylabel=ylabel,
-                                  title=(f"{title}\nSNR = {snr['snr_peak_ratio']:.2f}; "
-                                         f"z-score = {snr['z_score']:.2f}"))
-        ax_full.axvline(x=input_freq, lw=0.5, ls='--', color='gray')
-        ax_full.loglog(freqs[mask], psd[mask], 'k')
-
-        ax_zoom = fig.add_subplot(gs[2, col], xlim=[input_freq - 10, input_freq + 10],
-                                  xlabel="frequency (Hz)", ylabel=ylabel,
-                                  title=f"zoom @ {input_freq:.0f} Hz")
-        ax_zoom.axvline(x=input_freq, lw=0.5, ls='--', color='gray')
-        ax_zoom.plot(freqs[mask], psd[mask], 'k')
-        top = psd[arg] * zoom_factor
-        if np.isfinite(top) and top > 0:
-            ax_zoom.set_ylim(0, top)
-
-    if have_vm:
-        _plot_psd(0, freqs_vm, psd_vm, snr_vm, r"|$V_{\rm m}$|²/Hz",
-                  "Membrane potential", 5)
-    else:
-        ax = fig.add_subplot(gs[1, 0], title="Membrane potential\n(save_Vm=False)")
-        ax.axis("off")
-    _plot_psd(1, freqs_fr, psd_fr, snr_fr, "|firing rate|²/Hz",
-              "Firing rate", 1.2)
-    _plot_psd(2, freqs_in, psd_in, snr_in, "|input rate|²/Hz",
-              "Synaptic input rate", 1.2)
+            snr_text = []
+            for f in input_freqs:
+                snr = calculate_spectral_snr_and_zscore(freqs, psd, f, freq_window=snr_window)
+                snr_text.append(f"SNR @ {f:.0f} Hz: {snr['snr_peak_ratio']:.1f}")
+                print(f"{label} | {name} | SNR @ {f:.0f} Hz: {snr['snr_peak_ratio']:.2f} "
+                      f"(z-score {snr['z_score']:.1f})")
+            ax.text(0.99, 0.97, "\n".join(snr_text), transform=ax.transAxes,
+                    ha="right", va="top", fontsize=7,
+                    bbox=dict(facecolor="white", edgecolor="none", pad=1))
 
     simplify_axes(fig.axes)
-    out_name = join("figures", f"{sim_name}_{int(sim_time / 1000)}s.png")
+    os.makedirs("figures", exist_ok=True)
+    out_name = join("figures", f"{fig_name}.pdf")
     plt.savefig(out_name, dpi=150)
     print(f"Saved figure to '{out_name}'")
     return fig
@@ -359,28 +396,50 @@ def plot_synaptic_input_results(results, sim_params,
 if __name__ == "__main__":
 
     dt = 0.025
-    noise_level_Vm = 1.0
-    tau_syn = 0.1
-    sim_params = dict(
-        sim_time=100e3,
-        input_freq=2000.0,
+    sim_time = 20e3
+
+    input_params = dict(
+        sim_time=sim_time,
+        input_freqs=(20.0, 2000.0),
         input_rate=10.0,
-        input_ampl=1.0,
+        input_ampl=5.0,
         n_inputs=50,
-        syn_weight=22.0,
-        syn_delay=1.5,
-        tau_syn=tau_syn,
-        noise_level_Vm=noise_level_Vm,
+        seed=2,
+        resolution=dt,
+    )
+    inputs = generate_input_spike_trains(**input_params)
+
+    # Reference: very fast synapses, one shared delay, no noise, no spikes.
+    reference = dict(
+        sim_time=sim_time,
+        syn_weight=10.0,
+        syn_delay=2.0,
+        syn_delay_std=0.0,
+        tau_syn=2,
+        tau_syn_ref=2,
+        noise_level_Vm=0.0,
         C=100,
-        V_th=-40.,
+        V_th=0.,
         E_m=-60.,
         tau_m=10,
         seed=2,
         resolution=dt,
-        sim_name=f"synaptic_demo_noise:{noise_level_Vm}_tau_syn:{tau_syn}_no_spikes",
-        force_rerun=True,
-        save_Vm=True,
     )
+    # Each case is the reference with one individual modification.
+    cases = [
+        ("reference", {}),
+        #(r"$\tau_{\rm syn}$ = 2 ms", {"tau_syn": 2.0}),
+        ("delay std = 0.25 ms", {"syn_delay_std": 0.25}),
+        (r"$V_{\rm m}$ noise = 0.05 mV", {"noise_level_Vm": 0.05}),
+        (r"$V_{\rm th}$ = -50 mV", {"V_th": -50.}),
+    ]
 
-    results = run_synaptic_input_simulation(**sim_params)
-    plot_synaptic_input_results(results, sim_params, firing_rate_bin_size=dt)
+    case_results = []
+    for i, (label, mod) in enumerate(cases):
+        sim_params = {**reference, **mod, "sim_name": f"synaptic_demo_case{i}"}
+        case_results.append((label, run_synaptic_input_simulation(
+            inputs, input_params, **sim_params)))
+        print(f"{label}: firing rate {case_results[-1][1]['firing_rate']:.2f} Hz")
+
+    plot_synaptic_input_results(case_results, input_params["input_freqs"], dt,
+                                fig_name=f"synaptic_demo_cases_{int(sim_time / 1000)}s", tlim=(9.5, 10))
