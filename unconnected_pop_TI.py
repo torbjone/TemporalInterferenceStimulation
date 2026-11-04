@@ -698,7 +698,7 @@ def plot_spike_histogram(sim_params):
 
 if __name__ == "__main__":
 
-    target_stim_dVm = 0.06
+    target_stim_dVm = 0.25
     dt = 0.025
     carrier_f = 2000
     beat_f = 20

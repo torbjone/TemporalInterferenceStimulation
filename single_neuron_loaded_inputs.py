@@ -780,6 +780,210 @@ def plot_results(results, sim_params, tlim=(5, 6), max_f=2200,
     print(f"Saved figure to '{out_name}'")
     return fig
 
+
+def _postsynaptic_snr_from_results(results, stim_freq, firing_rate_bin_size=None,
+                                   use_welch=True, welch_segments=4,
+                                   freq_window=5):
+    """Return the postsynaptic (neuron B) SNR at `stim_freq`.
+
+    The SNR is computed from the firing-rate PSD of B, exactly as in
+    ``plot_results``.  If the membrane potential was saved, the Vm SNR is
+    returned as well.
+    """
+    params = results["params"]
+    sim_time = params["sim_time"]
+    if firing_rate_bin_size is None:
+        firing_rate_bin_size = params["resolution"]
+
+    B = results["B"]
+
+    b_rate, b_bins = find_spike_rate(B["spike_times"], firing_rate_bin_size, sim_time)
+    if use_welch:
+        fs = 1000.0 / firing_rate_bin_size
+        freqs_fr, psd_fr = welch(b_rate, fs=fs,
+                                 nperseg=len(b_rate) // welch_segments,
+                                 noverlap=(len(b_rate) // welch_segments) // 2)
+    else:
+        freqs_fr, psd_fr = return_freq_and_psd(b_bins, b_rate)
+        psd_fr = psd_fr[0]
+
+    snr_fr = calculate_spectral_snr_and_zscore(freqs_fr, psd_fr, stim_freq,
+                                               freq_window=freq_window)
+
+    out = {
+        "snr_fr": snr_fr["snr_peak_ratio"],
+        "z_fr": snr_fr["z_score"],
+        "firing_rate": B["firing_rate"],
+        "snr_Vm": np.nan,
+        "z_Vm": np.nan,
+    }
+
+    if "Vm" in B:
+        fs_vm = 1000.0 / params["resolution"]
+        if use_welch:
+            freqs_vm, psd_vm = welch(B["Vm"], fs=fs_vm,
+                                     nperseg=len(B["Vm"]) // welch_segments,
+                                     noverlap=(len(B["Vm"]) // welch_segments) // 2)
+        else:
+            freqs_vm, psd_vm = return_freq_and_psd(B["times"], B["Vm"])
+            psd_vm = psd_vm[0]
+        snr_vm = calculate_spectral_snr_and_zscore(freqs_vm, psd_vm, stim_freq,
+                                                   freq_window=freq_window)
+        out["snr_Vm"] = snr_vm["snr_peak_ratio"]
+        out["z_Vm"] = snr_vm["z_score"]
+
+    return out
+
+
+def find_simulated_target_stim_dVm(noise_type="ou", noise_level_Vm=5.0,
+                                   carrier_f=2000, beat_f=20, dt=0.025,
+                                   w=4.5, g=4.0, save_dir="results"):
+    """Scan `save_dir` for already simulated single-neuron runs and return a
+    sorted list of ``(target_stim_dVm, file_path)`` tuples.
+
+    Only runs matching the given stimulation / synapse parameters are
+    returned, i.e. files named like the ``sim_name`` built in ``__main__``:
+    ``single_neuron_from_pop_{noise_type}_{noise_level_Vm}_{dVm}_
+    {carrier_f}_{beat_f}_dt{dt}w{w}_g{g}.pkl``.
+    """
+    import glob
+    import re
+
+    pattern = (f"single_neuron_from_pop_{noise_type}_{noise_level_Vm}_*_"
+               f"{carrier_f}_{beat_f}_dt{dt}w{w}_g{g}.pkl")
+    regex = re.compile(
+        rf"single_neuron_from_pop_{re.escape(str(noise_type))}_"
+        rf"{re.escape(str(noise_level_Vm))}_([0-9.eE+-]+)_"
+        rf"{carrier_f}_{beat_f}_dt{dt}w{w}_g{g}\.pkl$")
+
+    found = []
+    for path in glob.glob(os.path.join(save_dir, pattern)):
+        m = regex.search(os.path.basename(path))
+        if m is None:
+            continue
+        try:
+            found.append((float(m.group(1)), path))
+        except ValueError:
+            continue
+    return sorted(found)
+
+
+def collect_snr_vs_target_stim_dVm(noise_type="ou", noise_level_Vm=5.0,
+                                   carrier_f=2000, beat_f=20, dt=0.025,
+                                   w=4.5, g=4.0, save_dir="results",
+                                   firing_rate_bin_size=None, use_welch=True,
+                                   welch_segments=4, freq_window=5,
+                                   cache_name=None, force_recompute=False):
+    """Compute the postsynaptic SNR for every already simulated
+    ``target_stim_dVm`` and return ``(dVm_values, snr_dict)``.
+
+    The result files are several GB each, so they are loaded (and released)
+    one at a time and the resulting SNR values are cached in a small pickle.
+    """
+    import gc
+
+    if cache_name is None:
+        cache_name = (f"snr_vs_target_stim_dVm_{noise_type}_{noise_level_Vm}_"
+                      f"{carrier_f}_{beat_f}_dt{dt}w{w}_g{g}"
+                      f"_welch{use_welch}:{welch_segments}.pkl")
+    cache_path = os.path.join(save_dir, cache_name)
+
+    cache = {}
+    if not force_recompute and os.path.isfile(cache_path):
+        try:
+            with open(cache_path, "rb") as f:
+                cache = pickle.load(f)
+        except (pickle.UnpicklingError, EOFError, ValueError) as e:
+            print(f"Could not load SNR cache '{cache_path}' ({e}) – recomputing.")
+            cache = {}
+
+    stim_freq = beat_f
+    runs = find_simulated_target_stim_dVm(noise_type=noise_type,
+                                          noise_level_Vm=noise_level_Vm,
+                                          carrier_f=carrier_f, beat_f=beat_f,
+                                          dt=dt, w=w, g=g, save_dir=save_dir)
+    if not runs:
+        raise FileNotFoundError(
+            f"No simulated single-neuron runs found in '{save_dir}' for "
+            f"noise_type={noise_type}, noise_level_Vm={noise_level_Vm}, "
+            f"carrier_f={carrier_f}, beat_f={beat_f}, dt={dt}, w={w}, g={g}")
+
+    print(f"Found {len(runs)} simulated target_stim_dVm values: "
+          f"{[d for d, _ in runs]}")
+
+    updated = False
+    for dVm, path in runs:
+        if dVm in cache and not force_recompute:
+            continue
+        print(f"Loading '{path}' (this may take a while) …")
+        with open(path, "rb") as f:
+            saved = pickle.load(f)
+        cache[dVm] = _postsynaptic_snr_from_results(
+            saved["results"], stim_freq,
+            firing_rate_bin_size=firing_rate_bin_size, use_welch=use_welch,
+            welch_segments=welch_segments, freq_window=freq_window)
+        updated = True
+        print(f"  target_stim_dVm={dVm}: postsynaptic SNR = "
+              f"{cache[dVm]['snr_fr']:.2f} (z={cache[dVm]['z_fr']:.1f}), "
+              f"rate = {cache[dVm]['firing_rate']:.2f} Hz")
+        del saved
+        gc.collect()
+
+    if updated:
+        os.makedirs(save_dir, exist_ok=True)
+        tmp_path = cache_path + ".tmp"
+        with open(tmp_path, "wb") as f:
+            pickle.dump(cache, f)
+        os.replace(tmp_path, cache_path)
+        print(f"Saved SNR summary to '{cache_path}'")
+
+    dVm_values = sorted(d for d, _ in runs)
+    return dVm_values, cache
+
+
+def plot_snr_vs_target_stim_dVm(noise_type="ou", noise_level_Vm=5.0,
+                                carrier_f=2000, beat_f=20, dt=0.025,
+                                w=4.5, g=4.0, save_dir="results",
+                                firing_rate_bin_size=None, use_welch=True,
+                                welch_segments=4, freq_window=5,
+                                plot_Vm=True, force_recompute=False):
+    """Plot the postsynaptic SNR at the beat frequency as a function of
+    ``target_stim_dVm`` for all already simulated values."""
+    dVm_values, snr = collect_snr_vs_target_stim_dVm(
+        noise_type=noise_type, noise_level_Vm=noise_level_Vm,
+        carrier_f=carrier_f, beat_f=beat_f, dt=dt, w=w, g=g,
+        save_dir=save_dir, firing_rate_bin_size=firing_rate_bin_size,
+        use_welch=use_welch, welch_segments=welch_segments,
+        freq_window=freq_window, force_recompute=force_recompute)
+
+    snr_fr = [snr[d]["snr_fr"] for d in dVm_values]
+    snr_vm = [snr[d]["snr_Vm"] for d in dVm_values]
+
+    plt.close("all")
+    fig = plt.figure(figsize=[4, 3])
+    fig.subplots_adjust(left=0.2, bottom=0.2, right=0.95, top=0.88)
+    ax = fig.add_subplot(1, 1, 1,
+                         title=f"postsynaptic SNR @ {beat_f} Hz",
+                         xlabel=r"target_stim_d$V_{\rm m}$ (mV)",
+                         ylabel="SNR (peak ratio)",
+                         #xscale="log", yscale="log"
+                         ylim=[0, 10]
+                         )
+    ax.plot(dVm_values, snr_fr, "ko-", label="firing rate")
+    if plot_Vm and np.any(np.isfinite(snr_vm)):
+        ax.plot(dVm_values, snr_vm, "r^--", label=r"$V_{\rm m}$")
+        ax.legend(frameon=False)
+
+    simplify_axes(fig.axes)
+    os.makedirs("figures", exist_ok=True)
+    out_name = join("figures",
+                    f"snr_vs_target_stim_dVm_{noise_type}_{noise_level_Vm}_"
+                    f"{carrier_f}_{beat_f}_dt{dt}w{w}_g{g}.png")
+    plt.savefig(out_name, dpi=150)
+    print(f"Saved figure to '{out_name}'")
+    return fig
+
+
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
 
@@ -788,7 +992,29 @@ if __name__ == "__main__":
     beat_f = 20
     noise_type = "ou"
     noise_level_Vm = 5.0
-    target_stim_dVm = 0.1
+    target_stim_dVm = 0.25
+
+    w = 4.5
+    g = 4.0
+
+    # Set to True to only plot the postsynaptic SNR as a function of
+    # target_stim_dVm for all already simulated values (no new simulation).
+    snr_vs_dVm_only =  True
+
+    if snr_vs_dVm_only:
+        plot_snr_vs_target_stim_dVm(
+            noise_type=noise_type,
+            noise_level_Vm=noise_level_Vm,
+            carrier_f=carrier_f,
+            beat_f=beat_f,
+            dt=dt,
+            w=w,
+            g=g,
+            save_dir="results",
+            use_welch=True,
+            welch_segments=4,
+        )
+        raise SystemExit
 
     # Parameters for the unconnected population (source of spikes)
     pop_sim_params = dict(
@@ -814,8 +1040,6 @@ if __name__ == "__main__":
     )
 
 
-    w = 4.5
-    g = 4.0
     sim_name = (f"single_neuron_from_pop_{noise_type}_{noise_level_Vm}_{target_stim_dVm}_{carrier_f}_{beat_f}_dt{dt}"
                 f"w{w}_g{g}")
 
