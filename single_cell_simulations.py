@@ -1229,8 +1229,8 @@ if __name__ == "__main__":
     force_rerun = False
     welch_segments = 8
     # noise_type = "multisine"
-    noise_type = "gaussian"
-    noise_type = "syn_noise"
+    # noise_type = "gaussian"
+    # noise_type = "syn_noise"
     noise_type = "ou"
 
     noise_level_Vm = 5.

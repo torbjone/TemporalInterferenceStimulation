@@ -885,9 +885,32 @@ def _postsynaptic_snr_from_results(results, stim_freq, firing_rate_bin_size=None
         "snr_fr": snr_fr["snr_peak_ratio"],
         "z_fr": snr_fr["z_score"],
         "firing_rate": B["firing_rate"],
+        "pre_fr_E": np.nan,
+        "pre_fr_I": np.nan,
         "snr_Vm": np.nan,
         "z_Vm": np.nan,
     }
+
+    # Presynaptic E and I firing rates (average per cell in Hz)
+    pop_E = results.get("pop_E")
+    if pop_E is None:
+        pop_E = results.get("pop")
+    if pop_E is not None and isinstance(pop_E, dict):
+        pop_size_E = pop_E.get("pop_size", results.get("params", {}).get("pop_size", 10000))
+        e_pop_data = pop_E.get("E", pop_E)
+        if isinstance(e_pop_data, dict) and "mean_population_rate" in e_pop_data:
+            out["pre_fr_E"] = e_pop_data["mean_population_rate"] / pop_size_E if pop_size_E else np.nan
+
+    pop_I = results.get("pop_I")
+    if pop_I is None:
+        pop_I = results.get("pop")
+    if pop_I is not None and isinstance(pop_I, dict):
+        pop_size_I = pop_I.get("pop_size", results.get("params", {}).get("pop_size", 10000))
+        i_pop_data = pop_I.get("I")
+        if i_pop_data is None:
+            i_pop_data = pop_I.get("E", pop_I)
+        if isinstance(i_pop_data, dict) and "mean_population_rate" in i_pop_data:
+            out["pre_fr_I"] = i_pop_data["mean_population_rate"] / pop_size_I if pop_size_I else np.nan
 
     if "Vm" in B:
         fs_vm = 1000.0 / params["resolution"]
@@ -1150,7 +1173,7 @@ def collect_snr_vs_target_stim_dVm(noise_type="ou", noise_level_Vm=5.0,
 
     updated = False
     for dVm, path in runs:
-        if dVm in cache and not force_recompute:
+        if dVm in cache and not force_recompute and "pre_fr_E" in cache[dVm]:
             continue
         print(f"Loading '{path}' (this may take a while) …")
         with open(path, "rb") as f:
@@ -1162,7 +1185,9 @@ def collect_snr_vs_target_stim_dVm(noise_type="ou", noise_level_Vm=5.0,
         updated = True
         print(f"  target_stim_dVm={dVm}: postsynaptic SNR = "
               f"{cache[dVm]['snr_fr']:.2f} (z={cache[dVm]['z_fr']:.1f}), "
-              f"rate = {cache[dVm]['firing_rate']:.2f} Hz")
+              f"post rate = {cache[dVm]['firing_rate']:.2f} Hz, "
+              f"pre E rate = {cache[dVm]['pre_fr_E']:.2f} Hz, "
+              f"pre I rate = {cache[dVm]['pre_fr_I']:.2f} Hz")
         del saved
         gc.collect()
 
@@ -1184,8 +1209,9 @@ def plot_snr_vs_target_stim_dVm(noise_type="ou", noise_level_Vm=5.0,
                                 firing_rate_bin_size=None, use_welch=True,
                                 welch_segments=4, freq_window=5,
                                 plot_Vm=False, force_recompute=False):
-    """Plot the postsynaptic firing rate SNR at the beat frequency as a function of
-    ``target_stim_dVm`` for all already simulated values.
+    """Plot the postsynaptic firing rate SNR, postsynaptic firing rate, and
+    presynaptic E/I population firing rates at the beat frequency as a function
+    of ``target_stim_dVm`` for all already simulated values.
 
     Parameters
     ----------
@@ -1210,15 +1236,7 @@ def plot_snr_vs_target_stim_dVm(noise_type="ou", noise_level_Vm=5.0,
         "I_only": dict(color="tab:red", marker="^", linestyle="-.", label="Only I stimulated"),
     }
 
-    plt.close("all")
-    fig = plt.figure(figsize=[5, 3.5])
-    fig.subplots_adjust(left=0.15, bottom=0.16, right=0.95, top=0.9)
-    ax = fig.add_subplot(1, 1, 1,
-                         xlabel=r"target stim d$V_{\rm m}$ (mV)",
-                         ylabel="SNR (peak ratio)",
-                         yscale="log")
-
-    plotted_any = False
+    target_data = {}
     for target in targets:
         try:
             dVm_values, snr = collect_snr_vs_target_stim_dVm(
@@ -1228,22 +1246,84 @@ def plot_snr_vs_target_stim_dVm(noise_type="ou", noise_level_Vm=5.0,
                 firing_rate_bin_size=firing_rate_bin_size,
                 use_welch=use_welch, welch_segments=welch_segments,
                 freq_window=freq_window, force_recompute=force_recompute)
+            target_data[target] = (dVm_values, snr)
         except FileNotFoundError as err:
             print(f"Skipping {target}: {err}")
             continue
 
-        snr_fr = [snr[d]["snr_fr"] for d in dVm_values]
-        style = styles.get(target, dict(marker="o", label=target))
-        ax.plot(dVm_values, snr_fr, **style)
-        plotted_any = True
-
-    if not plotted_any:
+    if not target_data:
         raise FileNotFoundError(f"No simulations found for targets {targets} in '{save_dir}'.")
 
-    ax.legend(frameon=False)
+    valid_targets = list(target_data.keys())
+    n_rows = len(valid_targets)
+    n_cols = 4
+
+    plt.close("all")
+    fig = plt.figure(figsize=[3.2 * n_cols, 3.0 * n_rows])
+    fig.subplots_adjust(left=0.07, bottom=0.09, right=0.98, top=0.93,
+                        wspace=0.4, hspace=0.5)
+
+    # One shared y-axis per column (first row defines the scale).
+    col_axes = {1: None, 2: None, 3: None, 4: None}
+
+    for row, target in enumerate(valid_targets):
+        dVm_values, snr = target_data[target]
+        style = styles.get(target, dict(marker="o", label=target))
+        target_label = style.get("label", target)
+
+        # Column 1: presynaptic rates
+        ax_pre = fig.add_subplot(n_rows, n_cols, row * n_cols + 1,
+                                 xlabel=r"target stim d$V_{\rm m}$ (mV)",
+                                 ylabel="presynaptic rate (Hz)",
+                                 sharey=col_axes[1])
+        col_axes[1] = col_axes[1] or ax_pre
+        ax_pre.set_title(target_label, fontsize=9)
+        pre_fr_E = [snr[d].get("pre_fr_E", np.nan) for d in dVm_values]
+        pre_fr_I = [snr[d].get("pre_fr_I", np.nan) for d in dVm_values]
+        ax_pre.plot(dVm_values, pre_fr_E, color="tab:blue", marker="s", linestyle="-", label="Presynaptic E")
+        ax_pre.plot(dVm_values, pre_fr_I, color="tab:red", marker="^", linestyle="--", label="Presynaptic I")
+        ax_pre.legend(frameon=False, fontsize=8)
+
+        # Column 2: postsynaptic rate
+        ax_fr = fig.add_subplot(n_rows, n_cols, row * n_cols + 2,
+                                xlabel=r"target stim d$V_{\rm m}$ (mV)",
+                                ylabel="post-synaptic rate (Hz)",
+                                sharey=col_axes[2])
+        col_axes[2] = col_axes[2] or ax_fr
+        ax_fr.set_title(target_label, fontsize=9)
+        fr = [snr[d]["firing_rate"] for d in dVm_values]
+        ax_fr.plot(dVm_values, fr, color="k", marker="o", linestyle="-")
+
+        # Column 3: SNR peak ratio
+        ax_snr = fig.add_subplot(n_rows, n_cols, row * n_cols + 3,
+                                 xlabel=r"target stim d$V_{\rm m}$ (mV)",
+                                 ylabel="SNR (peak ratio)",
+                                 yscale="log",
+                                 sharey=col_axes[3])
+        col_axes[3] = col_axes[3] or ax_snr
+        ax_snr.set_title(target_label, fontsize=9)
+        snr_fr = [snr[d]["snr_fr"] for d in dVm_values]
+        ax_snr.plot(dVm_values, snr_fr, color="k", marker="o", linestyle="-")
+
+        # Column 4: z-score
+        ax_z = fig.add_subplot(n_rows, n_cols, row * n_cols + 4,
+                               xlabel=r"target stim d$V_{\rm m}$ (mV)",
+                               ylabel="z-score",
+                               yscale="log",
+                               sharey=col_axes[4])
+        col_axes[4] = col_axes[4] or ax_z
+        ax_z.set_title(target_label, fontsize=9)
+        z_fr = [snr[d]["z_fr"] for d in dVm_values]
+        ax_z.plot(dVm_values, z_fr, color="k", marker="o", linestyle="-")
+
+        # Keep the y tick labels in every row, even though the y-axes are shared.
+        for ax_ in (ax_pre, ax_fr, ax_snr, ax_z):
+            ax_.tick_params(labelleft=True)
+
     simplify_axes(fig.axes)
+    mark_subplots(fig.axes, ypos=1.05)
     os.makedirs("figures", exist_ok=True)
-    target_tag = "_".join(targets) if len(targets) > 1 else targets[0]
+    target_tag = "_".join(valid_targets) if len(valid_targets) > 1 else valid_targets[0]
     out_name = join("figures",
                     f"snr_vs_target_stim_dVm_{target_tag}_{noise_type}_{noise_level_Vm}_"
                     f"{carrier_f}_{beat_f}_dt{dt}w{w}_g{g}.pdf")
@@ -1265,7 +1345,7 @@ if __name__ == "__main__":
 
     # Set to True to only plot the postsynaptic SNR as a function of
     # target_stim_dVm for all already simulated values (no new simulation).
-    snr_vs_dVm_only = False
+    snr_vs_dVm_only = True
 
     if snr_vs_dVm_only:
         for g in [4.0]:
@@ -1290,8 +1370,8 @@ if __name__ == "__main__":
 
 
     for g in [4.0]:
-        for stim_target in ["I"]:
-            for target_stim_dVm in [0.03, 0.05, 0.1, 0.15, 0.2, 0.25, 0.3]:
+        for stim_target in ["E", "both"]:
+            for target_stim_dVm in [0.0]:
 
                 # Run single-neuron simulation with selective stimulation:
                 results = run_single_neuron_selective_stim(
