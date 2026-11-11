@@ -227,6 +227,7 @@ def run_network_simulation(pop_size=100,
                                           C_m=C, resolution=resolution)
     else:
         I_noise = find_noise_std(noise_level_Vm, tau_m=tau_m, C_m=C, resolution=resolution)
+
     noise_E = nest.Create(
         "noise_generator", pop_size,
         params={"mean": 0.0, "std": I_noise, "dt": resolution})
@@ -698,7 +699,7 @@ def plot_spike_histogram(sim_params):
 
 if __name__ == "__main__":
 
-    target_stim_dVm = 0.25
+    target_stim_dVm = 0.0
     dt = 0.025
     carrier_f = 2000
     beat_f = 20

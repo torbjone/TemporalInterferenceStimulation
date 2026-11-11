@@ -16,6 +16,7 @@ Results are cached to a pickle file. Pass ``force_rerun=True`` to discard the
 cache."""
 
 import os
+import sys
 import pickle
 from os.path import join
 
@@ -339,9 +340,30 @@ def run_network_simulation(pop_size=100,
     return results
 
 
+def _single_neuron_params_match(saved_params, current_params):
+    """Check if saved parameters match current parameters, with backwards compatibility."""
+    if saved_params == current_params:
+        return True
+    for k, v in current_params.items():
+        if k in ("pop_sim_name_E", "pop_sim_name_I"):
+            saved_val = saved_params.get(k, saved_params.get("pop_sim_name"))
+            if saved_val != v:
+                return False
+        elif k == "pop_sim_name":
+            saved_val = saved_params.get("pop_sim_name", saved_params.get("pop_sim_name_E"))
+            if saved_val != v:
+                return False
+        else:
+            if saved_params.get(k) != v:
+                return False
+    return True
+
+
 def run_single_neuron_from_pop(
     # --- population (source) parameters ---
-    pop_sim_params: dict,
+    pop_sim_params: dict = None,
+    pop_sim_params_E: dict = None,
+    pop_sim_params_I: dict = None,
     # --- neuron B parameters ---
     exc_fraction: float = 0.8,
     inh_weight_factor: float = 4.0,
@@ -367,11 +389,14 @@ def run_single_neuron_from_pop(
 
     Parameters
     ----------
-    pop_sim_params : dict
+    pop_sim_params : dict, optional
         Keyword arguments forwarded to ``unconnected_pop_TI.run_network_simulation``
-        (with ``save_all_spikes=True`` added automatically). The population is
-        run (or loaded from cache) first; its spike times are then replayed
-        into neuron B.
+        (with ``save_all_spikes=True`` added automatically). Used for both E and I
+        if ``pop_sim_params_E`` and ``pop_sim_params_I`` are not separately given.
+    pop_sim_params_E, pop_sim_params_I : dict, optional
+        Separate parameter dicts for the excitatory and inhibitory populations,
+        allowing E and I to be loaded from different simulations (e.g. different
+        target_stim_dVm values).
     exc_fraction : float
         Fraction of the population treated as excitatory (default 0.8).
     inh_weight_factor : float
@@ -399,31 +424,53 @@ def run_single_neuron_from_pop(
     -------
     dict with keys:
         ``B``      – spike_times, Vm (optional), times (optional), firing_rate
-        ``pop``    – the full population results dict from unconnected_pop_TI
+        ``pop``    – the excitatory population results dict (for backwards compatibility)
+        ``pop_E``  – the full E population results dict
+        ``pop_I``  – the full I population results dict
         ``params`` – all parameters that define this run
     """
 
     # ------------------------------------------------------------------
-    # 1. Run (or load) the population simulation
+    # 1. Run (or load) the population simulation(s)
     # ------------------------------------------------------------------
-    pop_sim_params = dict(pop_sim_params, save_all_spikes=True)
+    if pop_sim_params_E is None and pop_sim_params_I is None:
+        if pop_sim_params is None:
+            raise ValueError("Must provide either pop_sim_params or pop_sim_params_E / pop_sim_params_I.")
+        pop_sim_params_E = pop_sim_params
+        pop_sim_params_I = pop_sim_params
+    elif pop_sim_params_E is None:
+        pop_sim_params_E = pop_sim_params
+    elif pop_sim_params_I is None:
+        pop_sim_params_I = pop_sim_params
 
-    pop_results = run_pop_simulation(**pop_sim_params)
+    pop_sim_params_E = dict(pop_sim_params_E, save_all_spikes=True)
+    pop_sim_params_I = dict(pop_sim_params_I, save_all_spikes=True)
 
-    pop_size = pop_results["pop_size"]
-    sim_time = pop_sim_params["sim_time"]
+    if pop_sim_params_E == pop_sim_params_I:
+        pop_results_E = run_pop_simulation(**pop_sim_params_E)
+        pop_results_I = pop_results_E
+    else:
+        pop_results_E = run_pop_simulation(**pop_sim_params_E)
+        pop_results_I = run_pop_simulation(**pop_sim_params_I)
 
-    n_E = int(round(exc_fraction * pop_size))
-    n_E = max(0, min(n_E, pop_size))
-    n_I = pop_size - n_E
+    pop_size_E = pop_results_E["pop_size"]
+    pop_size_I = pop_results_I["pop_size"]
+    sim_time = pop_sim_params_E["sim_time"]
+
+    n_E = int(round(exc_fraction * pop_size_E))
+    n_E = max(0, min(n_E, pop_size_E))
+    n_I = int(round((1.0 - exc_fraction) * pop_size_I))
+    n_I = max(0, min(n_I, pop_size_I))
     inh_weight = -inh_weight_factor * syn_weight
 
     # ------------------------------------------------------------------
     # 2. Build the parameter dict for caching
     # ------------------------------------------------------------------
     params = {
-        "pop_sim_name": pop_sim_params.get("sim_name", ""),
-        "pop_size": pop_size,
+        "pop_sim_name_E": pop_sim_params_E.get("sim_name", ""),
+        "pop_sim_name_I": pop_sim_params_I.get("sim_name", ""),
+        "pop_sim_name": pop_sim_params_E.get("sim_name", ""),
+        "pop_size": pop_size_E,
         "sim_time": sim_time,
         "exc_fraction": exc_fraction,
         "inh_weight_factor": inh_weight_factor,
@@ -453,21 +500,10 @@ def run_single_neuron_from_pop(
             saved = None
 
         if saved is not None:
-            if saved.get("params") == params:
+            if _single_neuron_params_match(saved.get("params", {}), params):
                 print(f"Loading saved results from '{save_path}'")
                 return saved["results"]
             print(f"Saved parameters differ – rerunning.")
-
-    # ------------------------------------------------------------------
-    # 3. Extract spike trains from the population results
-    # ------------------------------------------------------------------
-    E_data = pop_results["E"]
-    all_spike_times = np.asarray(E_data["all_spike_times"])   # ms, relative to cutoff
-    all_spike_ids   = np.asarray(E_data["all_spike_ids"])     # 0-based neuron index
-
-    # Split by E / I: first n_E neurons are excitatory, the rest inhibitory.
-    mask_E = all_spike_ids < n_E
-    mask_I = ~mask_E
 
     # ------------------------------------------------------------------
     # 4. Set up NEST
@@ -516,10 +552,6 @@ def run_single_neuron_from_pop(
     # ------------------------------------------------------------------
     # 7. Replay population spikes via spike_generator devices
     # ------------------------------------------------------------------
-    # NEST's spike_generator expects spike times > 0 in the *simulation*
-    # time frame (ms). The population spike times are already relative to
-    # the cutoff (0 … sim_time ms). We shift them by `cutoff` so that the
-    # replay starts after the same warm-up period.
     rng = np.random.default_rng(seed)
 
     def _make_delays(n):
@@ -531,8 +563,10 @@ def run_single_neuron_from_pop(
         d = np.maximum(d, resolution)
         return d
 
-    def _connect_population(neuron_ids, weight):
-        """Create one spike_generator per neuron and connect it to B."""
+    def _connect_population(pop_data, neuron_ids, weight):
+        """Create one spike_generator per neuron in neuron_ids and connect it to B."""
+        all_spike_times = np.asarray(pop_data["all_spike_times"])
+        all_spike_ids   = np.asarray(pop_data["all_spike_ids"])
         for nid in neuron_ids:
             spk = all_spike_times[all_spike_ids == nid] + cutoff  # shift to sim frame
             spk = np.sort(spk[spk > 0])
@@ -542,8 +576,14 @@ def run_single_neuron_from_pop(
             nest.Connect(sg, neuron_B,
                          syn_spec={"weight": weight, "delay": delay})
 
-    _connect_population(np.arange(n_E), syn_weight)
-    _connect_population(np.arange(n_E, pop_size), inh_weight)
+    e_ids = np.arange(n_E)
+    if pop_results_E is pop_results_I or pop_size_I >= n_E + n_I:
+        i_ids = np.arange(n_E, n_E + n_I)
+    else:
+        i_ids = np.arange(n_I)
+
+    _connect_population(pop_results_E["E"], e_ids, syn_weight)
+    _connect_population(pop_results_I["E"], i_ids, inh_weight)
 
     # ------------------------------------------------------------------
     # 8. Recorders
@@ -577,9 +617,26 @@ def run_single_neuron_from_pop(
         B_res["Vm"] = B_Vm
         B_res["times"] = B_times
 
+    def _strip_all_spikes(pop_res):
+        """Return a shallow copy of pop_res with all_spike_times and all_spike_ids removed to avoid duplicating huge spike arrays."""
+        if pop_res is None:
+            return None
+        res_copy = dict(pop_res)
+        if "E" in res_copy and isinstance(res_copy["E"], dict):
+            e_copy = dict(res_copy["E"])
+            e_copy.pop("all_spike_times", None)
+            e_copy.pop("all_spike_ids", None)
+            res_copy["E"] = e_copy
+        return res_copy
+
+    pop_res_E_saved = _strip_all_spikes(pop_results_E)
+    pop_res_I_saved = _strip_all_spikes(pop_results_I)
+
     results = {
         "B": B_res,
-        "pop": pop_results,
+        "pop": pop_res_E_saved,
+        "pop_E": pop_res_E_saved,
+        "pop_I": pop_res_I_saved,
         "n_E": n_E,
         "n_I": n_I,
         "exc_fraction": exc_fraction,
@@ -682,8 +739,8 @@ def plot_results(results, sim_params, tlim=(5, 6), max_f=2200,
     # --- Figure ---
     plt.close("all")
     n_rows = 3
-    fig = plt.figure(figsize=[10, 4])
-    fig.subplots_adjust(hspace=0.55, left=0.05, right=0.97, top=0.95, bottom=0.05)
+    fig = plt.figure(figsize=[10, 6])
+    fig.subplots_adjust(hspace=0.65, left=0.08, right=0.97, top=0.95, bottom=0.1)
 
     ax_vm = fig.add_subplot(n_rows, 1, 1, xlim=tlim,
                                    ylabel=r"$V_{\rm m}$ (mV)", frameon=False, xticks=[], yticks=[])
@@ -728,7 +785,7 @@ def plot_results(results, sim_params, tlim=(5, 6), max_f=2200,
     ax_vm.text(tlim[-1]+ 0.0025, -0.5, f"{vm_norm}\nmV" , ha="left", va="center")
 
 
-    # ax = fig.add_subplot(n_rows, 1, 2);
+    # ax = fig.add_subplot(n_rows, 1, 2)
     # ax.set_title(f"Neuron B Vm  (firing rate {B['firing_rate']:.2f} Hz, "
     #              f"w_E={results['syn_weight']:.1f} pA, "
     #              f"w_I={results['inh_weight']:.1f} pA)")
@@ -740,14 +797,14 @@ def plot_results(results, sim_params, tlim=(5, 6), max_f=2200,
     #     ax.vlines(t / 1000, V_th, V_th + 5, color="r", lw=0.8)
     #
     # # Spike raster (just B)
-    # ax = axes[row]; row += 1
+    # ax = fig.add_subplot(n_rows, 1, 3)
     # ax.set_title("Neuron B – spike raster")
     # ax.set_xlabel("time (s)")
     # mask_rast = (B["spike_times"] / 1000 >= tlim[0]) & (B["spike_times"] / 1000 <= tlim[1])
     # ax.vlines(B["spike_times"][mask_rast] / 1000, 0.6, 1.4, color="r", lw=0.8)
     # ax.set_xlim(tlim)
     # ax.set_yticks([1]); ax.set_yticklabels(["B"])
-    #
+
     # # Firing-rate PSD (full log-log)
     ax_pre_PSD = fig.add_subplot(3, 2, 3, title="presynaptic", xlabel="frequency (Hz)", ylabel="|firing rate|²/Hz")
     mask_f = (freqs_fr < max_f) & (freqs_fr > 1)
@@ -757,6 +814,20 @@ def plot_results(results, sim_params, tlim=(5, 6), max_f=2200,
 
     ax_fr_PSD = fig.add_subplot(3, 2, 4, title="postsynaptic", xlabel="frequency (Hz)", ylabel="|firing rate|²/Hz")
     ax_fr_PSD.loglog(freqs_fr[mask_f], psd_fr[mask_f], "k")
+
+
+    # # # Vm PSD (full log-log)
+    # ax_pre_Vm_PSD = fig.add_subplot(3, 2, 5, title="presynaptic", xlabel="frequency (Hz)", ylabel="|Vm|²/Hz")
+    # mask_f = (freqs_fr < max_f) & (freqs_fr > 1)
+    # # ax_pre_PSD.loglog(freqs_fr[mask_f], psd_pop[mask_f], "k")
+    # # for pre_psd in pre_psds:
+    # ax_pre_PSD.loglog(freqs_fr[mask_f], pre_psds[mask_f], "k")
+
+    ax_Vm_PSD = fig.add_subplot(3, 2, 6, title="postsynaptic", xlabel="frequency (Hz)", ylabel="|Vm|²/Hz")
+    mask_f = (freqs_vm < max_f) & (freqs_vm > 1)
+    ax_Vm_PSD.loglog(freqs_vm[mask_f], psd_vm[mask_f], "k")
+
+
 
     # ax.axvline(stim_freq, lw=0.7, ls="--", color="gray")
 
@@ -835,26 +906,190 @@ def _postsynaptic_snr_from_results(results, stim_freq, firing_rate_bin_size=None
     return out
 
 
+def build_pop_sim_params(
+    target_stim_dVm=0.15,
+    noise_type="ou",
+    noise_level_Vm=5.0,
+    carrier_f=2000,
+    beat_f=20,
+    dt=0.025,
+    pop_size=10000,
+    sim_time=1000e3,
+    tau_ou=5.0,
+    C=100,
+    V_th=-50.0,
+    E_m=-60.0,
+    tau_m=10,
+    n_record=5,
+    seed=2,
+    n_threads=4,
+    force_rerun=False,
+    save_Vm=True,
+):
+    """Build a standard pop_sim_params dictionary for unconnected_pop_TI."""
+    return dict(
+        pop_size=pop_size,
+        sim_time=sim_time,
+        f_values=[carrier_f, carrier_f + beat_f],
+        target_stim_dVm=target_stim_dVm,
+        noise_level_Vm=noise_level_Vm,
+        noise_type=noise_type,
+        tau_ou=tau_ou,
+        C=C,
+        V_th=V_th,
+        E_m=E_m,
+        tau_m=tau_m,
+        n_record=n_record,
+        pop_rate_bin_size=dt,
+        seed=seed,
+        resolution=dt,
+        n_threads=n_threads,
+        sim_name=f"pop_size_duration_scan_{noise_type}_{noise_level_Vm}_{target_stim_dVm}_{carrier_f}_{beat_f}_dt{dt}",
+        force_rerun=force_rerun,
+        save_Vm=save_Vm,
+    )
+
+
+def run_single_neuron_selective_stim(
+    target_stim_dVm=0.15,
+    stim_target="both",  # "both", "E", or "I"
+    unstim_dVm=0.0,
+    noise_type="ou",
+    noise_level_Vm=5.0,
+    carrier_f=2000,
+    beat_f=20,
+    dt=0.025,
+    w=4.5,
+    g=4.0,
+    exc_fraction=0.8,
+    syn_delay=1.5,
+    syn_delay_std=0.0,
+    tau_syn=2.0,
+    noise_level_Vm_B=0.0,
+    C=100,
+    V_th=-50.0,
+    E_m=-60.0,
+    tau_m=10,
+    seed=2,
+    pop_size=10000,
+    sim_time=1000e3,
+    tau_ou=5.0,
+    n_record=5,
+    n_threads=4,
+    force_rerun=False,
+    save_Vm=True,
+    save_dir="results",
+):
+    """Run a single-neuron simulation where either both E and I, only E,
+    or only I receive the TI stimulation `target_stim_dVm`.
+
+    The unstimulated subpopulation receives `unstim_dVm` (default 0.0).
+
+    Parameters
+    ----------
+    target_stim_dVm : float
+        Stimulation amplitude (target_stim_dVm) for stimulated population(s).
+    stim_target : {"both", "E", "I"}
+        Which population receives the stimulation:
+        - "both": Both E and I cells receive target_stim_dVm.
+        - "E" (or "E_only"): Only E cells receive target_stim_dVm, I cells receive unstim_dVm.
+        - "I" (or "I_only"): Only I cells receive target_stim_dVm, E cells receive unstim_dVm.
+    unstim_dVm : float
+        Stimulation amplitude for the unstimulated population (default 0.0).
+    """
+    if stim_target in ("both", "all", "EI", None):
+        dVm_E = target_stim_dVm
+        dVm_I = target_stim_dVm
+        sim_name = (f"single_neuron_from_pop_{noise_type}_{noise_level_Vm}_{target_stim_dVm}_"
+                    f"{carrier_f}_{beat_f}_dt{dt}w{w}_g{g}")
+    elif stim_target in ("E", "E_only", "exc"):
+        dVm_E = target_stim_dVm
+        dVm_I = unstim_dVm
+        sim_name = (f"single_neuron_from_pop_E_{noise_type}_{noise_level_Vm}_{target_stim_dVm}_"
+                    f"{carrier_f}_{beat_f}_dt{dt}w{w}_g{g}")
+    elif stim_target in ("I", "I_only", "inh"):
+        dVm_E = unstim_dVm
+        dVm_I = target_stim_dVm
+        sim_name = (f"single_neuron_from_pop_I_{noise_type}_{noise_level_Vm}_{target_stim_dVm}_"
+                    f"{carrier_f}_{beat_f}_dt{dt}w{w}_g{g}")
+    else:
+        raise ValueError(f"Unknown stim_target: {stim_target}. Must be 'both', 'E', or 'I'.")
+
+    pop_sim_params_E = build_pop_sim_params(
+        target_stim_dVm=dVm_E, noise_type=noise_type, noise_level_Vm=noise_level_Vm,
+        carrier_f=carrier_f, beat_f=beat_f, dt=dt, pop_size=pop_size, sim_time=sim_time,
+        tau_ou=tau_ou, C=C, V_th=V_th, E_m=E_m, tau_m=tau_m, n_record=n_record,
+        seed=seed, n_threads=n_threads, force_rerun=force_rerun, save_Vm=save_Vm,
+    )
+    pop_sim_params_I = build_pop_sim_params(
+        target_stim_dVm=dVm_I, noise_type=noise_type, noise_level_Vm=noise_level_Vm,
+        carrier_f=carrier_f, beat_f=beat_f, dt=dt, pop_size=pop_size, sim_time=sim_time,
+        tau_ou=tau_ou, C=C, V_th=V_th, E_m=E_m, tau_m=tau_m, n_record=n_record,
+        seed=seed, n_threads=n_threads, force_rerun=force_rerun, save_Vm=save_Vm,
+    )
+
+    return run_single_neuron_from_pop(
+        pop_sim_params_E=pop_sim_params_E,
+        pop_sim_params_I=pop_sim_params_I,
+        exc_fraction=exc_fraction,
+        inh_weight_factor=g,
+        syn_weight=w,
+        syn_delay=syn_delay,
+        syn_delay_std=syn_delay_std,
+        tau_syn=tau_syn,
+        noise_level_Vm_B=noise_level_Vm_B,
+        C=C,
+        V_th=V_th,
+        E_m=E_m,
+        tau_m=tau_m,
+        seed=seed,
+        resolution=dt,
+        sim_name=sim_name,
+        save_dir=save_dir,
+        force_rerun=force_rerun,
+        save_Vm=save_Vm,
+    )
+
+
 def find_simulated_target_stim_dVm(noise_type="ou", noise_level_Vm=5.0,
                                    carrier_f=2000, beat_f=20, dt=0.025,
-                                   w=4.5, g=4.0, save_dir="results"):
+                                   w=4.5, g=4.0, stim_target="both", save_dir="results"):
     """Scan `save_dir` for already simulated single-neuron runs and return a
     sorted list of ``(target_stim_dVm, file_path)`` tuples.
 
     Only runs matching the given stimulation / synapse parameters are
-    returned, i.e. files named like the ``sim_name`` built in ``__main__``:
-    ``single_neuron_from_pop_{noise_type}_{noise_level_Vm}_{dVm}_
-    {carrier_f}_{beat_f}_dt{dt}w{w}_g{g}.pkl``.
+    returned.
+    `stim_target` can be:
+      - "both" (or "all", None): matches single_neuron_from_pop_{noise_type}_{noise_level_Vm}_{dVm}_{carrier_f}_{beat_f}_dt{dt}w{w}_g{g}.pkl
+      - "E" (or "E_only"): matches single_neuron_from_pop_E_{noise_type}_{noise_level_Vm}_{dVm}_{carrier_f}_{beat_f}_dt{dt}w{w}_g{g}.pkl
+      - "I" (or "I_only"): matches single_neuron_from_pop_I_{noise_type}_{noise_level_Vm}_{dVm}_{carrier_f}_{beat_f}_dt{dt}w{w}_g{g}.pkl
     """
     import glob
     import re
 
-    pattern = (f"single_neuron_from_pop_{noise_type}_{noise_level_Vm}_*_"
-               f"{carrier_f}_{beat_f}_dt{dt}w{w}_g{g}.pkl")
-    regex = re.compile(
-        rf"single_neuron_from_pop_{re.escape(str(noise_type))}_"
-        rf"{re.escape(str(noise_level_Vm))}_([0-9.eE+-]+)_"
-        rf"{carrier_f}_{beat_f}_dt{dt}w{w}_g{g}\.pkl$")
+    if stim_target in ("both", "all", "EI", None):
+        pattern = (f"single_neuron_from_pop_{noise_type}_{noise_level_Vm}_*_"
+                   f"{carrier_f}_{beat_f}_dt{dt}w{w}_g{g}.pkl")
+        regex = re.compile(
+            rf"single_neuron_from_pop_{re.escape(str(noise_type))}_"
+            rf"{re.escape(str(noise_level_Vm))}_([0-9.eE+-]+)_"
+            rf"{carrier_f}_{beat_f}_dt{dt}w{w}_g{g}\.pkl$")
+    elif stim_target in ("E", "E_only", "exc"):
+        pattern = (f"single_neuron_from_pop_E_{noise_type}_{noise_level_Vm}_*_"
+                   f"{carrier_f}_{beat_f}_dt{dt}w{w}_g{g}.pkl")
+        regex = re.compile(
+            rf"single_neuron_from_pop_E_{re.escape(str(noise_type))}_"
+            rf"{re.escape(str(noise_level_Vm))}_([0-9.eE+-]+)_"
+            rf"{carrier_f}_{beat_f}_dt{dt}w{w}_g{g}\.pkl$")
+    elif stim_target in ("I", "I_only", "inh"):
+        pattern = (f"single_neuron_from_pop_I_{noise_type}_{noise_level_Vm}_*_"
+                   f"{carrier_f}_{beat_f}_dt{dt}w{w}_g{g}.pkl")
+        regex = re.compile(
+            rf"single_neuron_from_pop_I_{re.escape(str(noise_type))}_"
+            rf"{re.escape(str(noise_level_Vm))}_([0-9.eE+-]+)_"
+            rf"{carrier_f}_{beat_f}_dt{dt}w{w}_g{g}\.pkl$")
+    else:
+        raise ValueError(f"Unknown stim_target '{stim_target}'. Must be 'both', 'E', or 'I'.")
 
     found = []
     for path in glob.glob(os.path.join(save_dir, pattern)):
@@ -870,7 +1105,7 @@ def find_simulated_target_stim_dVm(noise_type="ou", noise_level_Vm=5.0,
 
 def collect_snr_vs_target_stim_dVm(noise_type="ou", noise_level_Vm=5.0,
                                    carrier_f=2000, beat_f=20, dt=0.025,
-                                   w=4.5, g=4.0, save_dir="results",
+                                   w=4.5, g=4.0, stim_target="both", save_dir="results",
                                    firing_rate_bin_size=None, use_welch=True,
                                    welch_segments=4, freq_window=5,
                                    cache_name=None, force_recompute=False):
@@ -882,8 +1117,9 @@ def collect_snr_vs_target_stim_dVm(noise_type="ou", noise_level_Vm=5.0,
     """
     import gc
 
+    target_tag = f"_{stim_target}" if stim_target not in ("both", "all", "EI", None) else ""
     if cache_name is None:
-        cache_name = (f"snr_vs_target_stim_dVm_{noise_type}_{noise_level_Vm}_"
+        cache_name = (f"snr_vs_target_stim_dVm{target_tag}_{noise_type}_{noise_level_Vm}_"
                       f"{carrier_f}_{beat_f}_dt{dt}w{w}_g{g}"
                       f"_welch{use_welch}:{welch_segments}.pkl")
     cache_path = os.path.join(save_dir, cache_name)
@@ -901,14 +1137,15 @@ def collect_snr_vs_target_stim_dVm(noise_type="ou", noise_level_Vm=5.0,
     runs = find_simulated_target_stim_dVm(noise_type=noise_type,
                                           noise_level_Vm=noise_level_Vm,
                                           carrier_f=carrier_f, beat_f=beat_f,
-                                          dt=dt, w=w, g=g, save_dir=save_dir)
+                                          dt=dt, w=w, g=g,
+                                          stim_target=stim_target, save_dir=save_dir)
     if not runs:
         raise FileNotFoundError(
-            f"No simulated single-neuron runs found in '{save_dir}' for "
+            f"No simulated single-neuron runs found in '{save_dir}' for stim_target={stim_target}, "
             f"noise_type={noise_type}, noise_level_Vm={noise_level_Vm}, "
             f"carrier_f={carrier_f}, beat_f={beat_f}, dt={dt}, w={w}, g={g}")
 
-    print(f"Found {len(runs)} simulated target_stim_dVm values: "
+    print(f"[{stim_target}] Found {len(runs)} simulated target_stim_dVm values: "
           f"{[d for d, _ in runs]}")
 
     updated = False
@@ -943,42 +1180,73 @@ def collect_snr_vs_target_stim_dVm(noise_type="ou", noise_level_Vm=5.0,
 
 def plot_snr_vs_target_stim_dVm(noise_type="ou", noise_level_Vm=5.0,
                                 carrier_f=2000, beat_f=20, dt=0.025,
-                                w=4.5, g=4.0, save_dir="results",
+                                w=4.5, g=4.0, stim_target="compare", save_dir="results",
                                 firing_rate_bin_size=None, use_welch=True,
                                 welch_segments=4, freq_window=5,
-                                plot_Vm=True, force_recompute=False):
-    """Plot the postsynaptic SNR at the beat frequency as a function of
-    ``target_stim_dVm`` for all already simulated values."""
-    dVm_values, snr = collect_snr_vs_target_stim_dVm(
-        noise_type=noise_type, noise_level_Vm=noise_level_Vm,
-        carrier_f=carrier_f, beat_f=beat_f, dt=dt, w=w, g=g,
-        save_dir=save_dir, firing_rate_bin_size=firing_rate_bin_size,
-        use_welch=use_welch, welch_segments=welch_segments,
-        freq_window=freq_window, force_recompute=force_recompute)
+                                plot_Vm=False, force_recompute=False):
+    """Plot the postsynaptic firing rate SNR at the beat frequency as a function of
+    ``target_stim_dVm`` for all already simulated values.
 
-    snr_fr = [snr[d]["snr_fr"] for d in dVm_values]
-    snr_vm = [snr[d]["snr_Vm"] for d in dVm_values]
+    Parameters
+    ----------
+    stim_target : str or list of str
+        "both": plot only runs where both E and I are stimulated.
+        "E": plot only runs where E cells are stimulated.
+        "I": plot only runs where I cells are stimulated.
+        "compare" or ["both", "E", "I"]: plot all available conditions on the same figure.
+    """
+    if stim_target == "compare":
+        targets = ["both", "E", "I"]
+    elif isinstance(stim_target, (list, tuple)):
+        targets = list(stim_target)
+    else:
+        targets = [stim_target]
+
+    styles = {
+        "both": dict(color="k", marker="o", linestyle="-", label="E + I stimulated"),
+        "E": dict(color="tab:blue", marker="s", linestyle="--", label="Only E stimulated"),
+        "I": dict(color="tab:red", marker="^", linestyle="-.", label="Only I stimulated"),
+        "E_only": dict(color="tab:blue", marker="s", linestyle="--", label="Only E stimulated"),
+        "I_only": dict(color="tab:red", marker="^", linestyle="-.", label="Only I stimulated"),
+    }
 
     plt.close("all")
-    fig = plt.figure(figsize=[4, 3])
-    fig.subplots_adjust(left=0.2, bottom=0.2, right=0.95, top=0.88)
+    fig = plt.figure(figsize=[5, 3.5])
+    fig.subplots_adjust(left=0.15, bottom=0.16, right=0.95, top=0.9)
     ax = fig.add_subplot(1, 1, 1,
-                         title=f"postsynaptic SNR @ {beat_f} Hz",
-                         xlabel=r"target_stim_d$V_{\rm m}$ (mV)",
+                         xlabel=r"target stim d$V_{\rm m}$ (mV)",
                          ylabel="SNR (peak ratio)",
-                         #xscale="log", yscale="log"
-                         ylim=[0, 10]
-                         )
-    ax.plot(dVm_values, snr_fr, "ko-", label="firing rate")
-    if plot_Vm and np.any(np.isfinite(snr_vm)):
-        ax.plot(dVm_values, snr_vm, "r^--", label=r"$V_{\rm m}$")
-        ax.legend(frameon=False)
+                         yscale="log")
 
+    plotted_any = False
+    for target in targets:
+        try:
+            dVm_values, snr = collect_snr_vs_target_stim_dVm(
+                noise_type=noise_type, noise_level_Vm=noise_level_Vm,
+                carrier_f=carrier_f, beat_f=beat_f, dt=dt, w=w, g=g,
+                stim_target=target, save_dir=save_dir,
+                firing_rate_bin_size=firing_rate_bin_size,
+                use_welch=use_welch, welch_segments=welch_segments,
+                freq_window=freq_window, force_recompute=force_recompute)
+        except FileNotFoundError as err:
+            print(f"Skipping {target}: {err}")
+            continue
+
+        snr_fr = [snr[d]["snr_fr"] for d in dVm_values]
+        style = styles.get(target, dict(marker="o", label=target))
+        ax.plot(dVm_values, snr_fr, **style)
+        plotted_any = True
+
+    if not plotted_any:
+        raise FileNotFoundError(f"No simulations found for targets {targets} in '{save_dir}'.")
+
+    ax.legend(frameon=False)
     simplify_axes(fig.axes)
     os.makedirs("figures", exist_ok=True)
+    target_tag = "_".join(targets) if len(targets) > 1 else targets[0]
     out_name = join("figures",
-                    f"snr_vs_target_stim_dVm_{noise_type}_{noise_level_Vm}_"
-                    f"{carrier_f}_{beat_f}_dt{dt}w{w}_g{g}.png")
+                    f"snr_vs_target_stim_dVm_{target_tag}_{noise_type}_{noise_level_Vm}_"
+                    f"{carrier_f}_{beat_f}_dt{dt}w{w}_g{g}.pdf")
     plt.savefig(out_name, dpi=150)
     print(f"Saved figure to '{out_name}'")
     return fig
@@ -992,78 +1260,95 @@ if __name__ == "__main__":
     beat_f = 20
     noise_type = "ou"
     noise_level_Vm = 5.0
-    target_stim_dVm = 0.25
 
     w = 4.5
-    g = 4.0
 
     # Set to True to only plot the postsynaptic SNR as a function of
     # target_stim_dVm for all already simulated values (no new simulation).
-    snr_vs_dVm_only =  True
+    snr_vs_dVm_only = False
 
     if snr_vs_dVm_only:
-        plot_snr_vs_target_stim_dVm(
-            noise_type=noise_type,
-            noise_level_Vm=noise_level_Vm,
-            carrier_f=carrier_f,
-            beat_f=beat_f,
-            dt=dt,
-            w=w,
-            g=g,
-            save_dir="results",
-            use_welch=True,
-            welch_segments=4,
-        )
+        for g in [4.0]:
+            for stim_target in ["compare"]:
+                try:
+                    plot_snr_vs_target_stim_dVm(
+                        noise_type=noise_type,
+                        noise_level_Vm=noise_level_Vm,
+                        carrier_f=carrier_f,
+                        beat_f=beat_f,
+                        dt=dt,
+                        w=w,
+                        g=g,
+                        stim_target=stim_target,
+                        save_dir="results",
+                        use_welch=True,
+                        welch_segments=4,
+                    )
+                except FileNotFoundError as err:
+                    print(f"Skipping plot for g={g}, stim_target={stim_target}: {err}")
         raise SystemExit
 
-    # Parameters for the unconnected population (source of spikes)
-    pop_sim_params = dict(
-        pop_size=10000,
-        sim_time=1000e3,
-        f_values=[carrier_f, carrier_f + beat_f],
-        target_stim_dVm=target_stim_dVm,
-        noise_level_Vm=noise_level_Vm,
-        noise_type=noise_type,
-        tau_ou=5.0,
-        C=100,
-        V_th=-50.0,
-        E_m=-60.0,
-        tau_m=10,
-        n_record=5,
-        pop_rate_bin_size=dt,
-        seed=2,
-        resolution=dt,
-        n_threads=4,
-        sim_name=f"pop_size_duration_scan_{noise_type}_{noise_level_Vm}_{target_stim_dVm}_{carrier_f}_{beat_f}_dt{dt}",
-        force_rerun=False,
-        save_Vm=True,
-    )
+
+    for g in [4.0]:
+        for stim_target in ["I"]:
+            for target_stim_dVm in [0.03, 0.05, 0.1, 0.15, 0.2, 0.25, 0.3]:
+
+                # Run single-neuron simulation with selective stimulation:
+                results = run_single_neuron_selective_stim(
+                    target_stim_dVm=target_stim_dVm,
+                    stim_target=stim_target,
+                    noise_type=noise_type,
+                    noise_level_Vm=noise_level_Vm,
+                    carrier_f=carrier_f,
+                    beat_f=beat_f,
+                    dt=dt,
+                    w=w,
+                    g=g,
+                    exc_fraction=0.8,
+                    syn_delay=1.5,
+                    syn_delay_std=0.0,
+                    tau_syn=2.0,
+                    noise_level_Vm_B=0.0,
+                    C=100,
+                    V_th=-50.0,
+                    E_m=-60.0,
+                    tau_m=10,
+                    seed=2,
+                    pop_size=10000,
+                    sim_time=1000e3,
+                    force_rerun=False,
+                    save_Vm=True,
+                    save_dir="results",
+                )
+
+                pop_sim_params = build_pop_sim_params(
+                    target_stim_dVm=target_stim_dVm,
+                    noise_type=noise_type,
+                    noise_level_Vm=noise_level_Vm,
+                    carrier_f=carrier_f,
+                    beat_f=beat_f,
+                    dt=dt,
+                )
+
+                plot_results(results, pop_sim_params, tlim=(3.8, 4.2), use_welch=True,
+                             welch_segments=4)
 
 
-    sim_name = (f"single_neuron_from_pop_{noise_type}_{noise_level_Vm}_{target_stim_dVm}_{carrier_f}_{beat_f}_dt{dt}"
-                f"w{w}_g{g}")
-
-    results = run_single_neuron_from_pop(
-        pop_sim_params=pop_sim_params,
-        exc_fraction=0.8,
-        inh_weight_factor=g,
-        syn_weight=w,
-        syn_delay=1.5,
-        syn_delay_std=0.0,
-        tau_syn=2.0,
-        noise_level_Vm_B=0.0,
-        C=100,
-        V_th=-50.0,
-        E_m=-60.0,
-        tau_m=10,
-        seed=3,
-        resolution=dt,
-        sim_name=sim_name,
-        save_dir="results",
-        force_rerun=False,
-        save_Vm=True,
-    )
-
-    plot_results(results, pop_sim_params, tlim=(3.8, 4.2), use_welch=True,
-                 welch_segments=4)
-    #plt.show()
+    for g in [4.0]:
+        for stim_target in ["compare"]:
+            try:
+                plot_snr_vs_target_stim_dVm(
+                    noise_type=noise_type,
+                    noise_level_Vm=noise_level_Vm,
+                    carrier_f=carrier_f,
+                    beat_f=beat_f,
+                    dt=dt,
+                    w=w,
+                    g=g,
+                    stim_target=stim_target,
+                    save_dir="results",
+                    use_welch=True,
+                    welch_segments=4,
+                )
+            except FileNotFoundError as err:
+                print(f"Skipping plot for g={g}, stim_target={stim_target}: {err}")
