@@ -5,9 +5,9 @@ import math
 from os.path import join
 import numpy as np
 import matplotlib.pyplot as plt
-
+from scipy import stats
 from scipy.signal import welch
-
+import warnings
 
 def find_I(target_dVm, f, tau_m=10., C_m=100.):
     """Current amplitude (pA) for a sinusoidal input at frequency `f` (Hz) that
@@ -313,101 +313,390 @@ def psd_welch(spike_times, sim_time, bin_size=0.1, segments=8,):
 
     return freqs, psd_values
 
-def calculate_spectral_snr_and_zscore(
+def welch_psd_fixed_resolution(sig, fs, freq_resolution=0.05,
+                               detrend="constant"):
+    """Welch PSD of `sig` with a *fixed* frequency resolution.
+
+    `nperseg` is set from the requested `freq_resolution` (Hz) instead of from
+    a requested number of segments, so the bin width df is the same for every
+    simulation, independent of the recording length. Longer recordings then
+    simply give more averaged segments (lower variance) rather than a finer df.
+    This keeps all spectral measures directly comparable across runs.
+
+    Returns (freqs, psd), with psd in units of sig^2/Hz (density scaling)."""
+    nperseg = int(round(fs / freq_resolution))
+    nperseg = int(min(nperseg, len(sig)))
+    freqs, psd = welch(sig, fs=fs, nperseg=nperseg, noverlap=nperseg // 2,
+                       detrend=detrend)
+    return freqs, psd
+
+
+def calculate_band_snr_and_zscore(
+    freqs: np.ndarray,
+    psd_signal: np.ndarray,
+    analysis_freq: float,
+    band_halfwidth: float = 0.2,
+    freq_window: float = 5.0,
+    ref_bandwidth: float = 0.01
+) -> dict:
+    """Band-integrated SNR and z-score for a narrow spectral line at
+    `analysis_freq`.
+
+    Unlike the peak-bin measure (calculate_spectral_snr_and_zscore), this
+    estimator is (to first order) *invariant* with respect to the frequency
+    resolution df: a stationary sinusoidal line has a PSD peak that scales as
+    1/df, but its integrated power, sum(psd[band]) * df, is independent of df
+    as long as the band covers the line. One can therefore average many Welch
+    segments (small variance in the noise estimate) without losing the signal.
+
+    The signal band spans [f0 - band_halfwidth, f0 + band_halfwidth]. The null
+    distribution is built from *equally wide* control bands tiling the local
+    window [f0 - freq_window, f0 + freq_window], excluding the signal band and
+    its immediate neighbour blocks. Both the noise level and its scatter are
+    thus measured on exactly the same statistic as the signal, which makes the
+    z-score meaningful even though single PSD bins are chi2 distributed.
+
+    Parameters
+    ----------
+    freqs, psd_signal : np.ndarray
+        Frequencies (Hz) and one-sided PSD (density scaling, sig^2/Hz).
+    analysis_freq : float
+        Target frequency f_0 (e.g. the beat frequency).
+    band_halfwidth : float
+        Half-width (Hz) of the integration band around f_0. Should cover the
+        line (i.e. be at least ~2 frequency bins wide), but no wider than
+        needed, since the noise contribution grows with the band width.
+    freq_window : float
+        Half-width (Hz) of the local window used for the control bands.
+    ref_bandwidth : float
+        Reference noise bandwidth B_ref (Hz) used for 'snr_ref'. The line power
+        is compared with the noise power contained in B_ref rather than with
+        the noise in the (arbitrary) integration band, which keeps the measure
+        independent of both df and `band_halfwidth`. B_ref must be stated
+        wherever 'snr_ref' is reported.
+
+    Returns
+    -------
+    dict
+        - 'snr_band_ratio'  : P_band / P_noise (1.0 means "pure noise")
+        - 'snr_band_excess' : (P_band - P_noise) / P_noise
+        - 'snr_band_db'     : 10*log10(snr_band_ratio)
+        - 'z_score'         : (P_band - P_noise) / sigma_noise, with the median
+                              and the MAD-based sigma taken over the control
+                              bands
+        - 'p_value'         : empirical one-sided p-value, the fraction of
+                              control bands with at least as much power
+        - 'band_power'      : integrated power in the signal band
+        - 'noise_power'     : median integrated power of the control bands
+        - 'excess_power'    : band_power - noise_power (the line power)
+        - 'noise_psd_level' : noise PSD level N0 = noise_power / (n_band * df)
+        - 'snr_ref'         : excess_power / (N0 * ref_bandwidth), i.e. the line
+                              power relative to the noise power in a *fixed*
+                              reference bandwidth B_ref
+        - 'amplitude'       : amplitude of the equivalent sinusoid,
+                              sqrt(2 * excess_power) (nan if excess <= 0)
+        - 'band_freqs'      : (f_lo, f_hi) of the integration band
+        - 'n_band_bins', 'n_control_bands', 'df'
+    """
+    freqs = np.asarray(freqs)
+    psd_signal = np.asarray(psd_signal)
+
+    df = float(np.median(np.diff(freqs))) if len(freqs) > 1 else 1.0
+
+    peak_idx = int(np.argmin(np.abs(freqs - analysis_freq)))
+    f0 = float(freqs[peak_idx])
+
+    # Small relative tolerance so that a bin sitting exactly at the band edge
+    # is not dropped by floating-point round-off in the frequency grid.
+    band_tol = band_halfwidth * (1 + 1e-9)
+    band_idx = np.where(np.abs(freqs - f0) <= band_tol)[0]
+    if len(band_idx) == 0:
+        band_idx = np.array([peak_idx])
+    n_band = len(band_idx)
+
+    band_power = float(np.sum(psd_signal[band_idx]) * df)
+
+    # Control bands: blocks of n_band contiguous bins tiling the local window,
+    # leaving one block of guard distance on each side of the signal band.
+    i_lo = int(np.searchsorted(freqs, f0 - freq_window))
+    i_hi = int(np.searchsorted(freqs, f0 + freq_window, side="right"))
+
+    control_power = []
+    start = band_idx[0] - 2 * n_band
+    while start >= i_lo:
+        control_power.append(np.sum(psd_signal[start:start + n_band]) * df)
+        start -= n_band
+    start = band_idx[-1] + 1 + n_band
+    while start + n_band <= i_hi:
+        control_power.append(np.sum(psd_signal[start:start + n_band]) * df)
+        start += n_band
+
+    control_power = np.asarray(control_power, dtype=float)
+    if len(control_power) < 3:
+        raise ValueError(
+            f"Insufficient control bands ({len(control_power)} found). "
+            "Increase `freq_window` or decrease `band_halfwidth`.")
+
+    noise_power = float(np.median(control_power))
+    mad = float(np.median(np.abs(control_power - noise_power)))
+    sigma_noise = max(1.4826 * mad, 1e-12)
+    noise_power_safe = max(noise_power, 1e-12)
+
+    excess_power = band_power - noise_power
+    snr_band_ratio = band_power / noise_power_safe
+    z_score = excess_power / sigma_noise
+    p_value = float((1 + np.sum(control_power >= band_power))
+                    / (1 + len(control_power)))
+    amplitude = float(np.sqrt(2 * excess_power)) if excess_power > 0 else np.nan
+
+    # Noise PSD level (sig^2/Hz) behind the control bands, and the line power
+    # expressed relative to the noise power in a fixed reference bandwidth.
+    noise_psd_level = noise_power_safe / (n_band * df)
+    snr_ref = excess_power / (noise_psd_level * ref_bandwidth)
+
+    return {
+        'snr_band_ratio': float(snr_band_ratio),
+        'snr_band_excess': float(excess_power / noise_power_safe),
+        'snr_band_db': float(10.0 * np.log10(max(snr_band_ratio, 1e-12))),
+        'z_score': float(z_score),
+        'p_value': p_value,
+        'band_power': band_power,
+        'noise_power': noise_power,
+        'excess_power': float(excess_power),
+        'amplitude': amplitude,
+        'noise_psd_level': float(noise_psd_level),
+        'snr_ref': float(snr_ref),
+        'ref_bandwidth': float(ref_bandwidth),
+        'band_freqs': (f0 - band_halfwidth, f0 + band_halfwidth),
+        'n_band_bins': int(n_band),
+        'n_control_bands': int(len(control_power)),
+        'df': df,
+    }
+
+
+def calculate_non_welch_snr_and_zscore(
     freqs: np.ndarray,
     psd_signal: np.ndarray,
     analysis_freq: float,
     freq_window: float,
-    exclude_window: float = None
+    exclude_window: float = None,
 ) -> dict:
-    """
-    Calculates the robust Z-score and Peak-above-Median SNR for a specified target peak.
+    """Exact chi-squared tail test of a prespecified peak in a raw
+    (non-Welch) periodogram.
 
     Parameters
     ----------
     freqs : np.ndarray
         1D array of frequency values (Hz).
     psd_signal : np.ndarray
-        1D array of Power Spectral Density values corresponding to `freqs`.
+        1D array of periodogram power values corresponding to `freqs`.
+        Must be a single unaveraged periodogram: under the null its
+        ordinates are Exp(mu) = chi2(2)/2 * mu/2 distributed.
     analysis_freq : float
         Target frequency of interest f_0 (e.g., beat frequency).
     freq_window : float
         Half-width of the local noise analysis window around analysis_freq.
         Local window spans [analysis_freq - freq_window, analysis_freq + freq_window].
     exclude_window : float, optional
-        Half-width of the exclusion zone around analysis_freq to mask out the signal
-        peak itself. Defaults to 2 * frequency_step if None.
+        Half-width of the exclusion zone masking the signal peak.
+        Defaults to 2 * df.
+
 
     Returns
     -------
     dict
-        - 'z_score': Robust Z-score (peak height in standard deviations above median noise)
-        - 'snr_peak_ratio': Ratio of peak power to median noise (S_peak / mu_local)
-        - 'snr_excess_ratio': Relative excess power above median ((S_peak - mu_local) / mu_local)
-        - 'snr_db': Peak ratio in dB (10 * log10(snr_peak_ratio))
-        - 'peak_freq': Actual frequency bin location used for the peak
-        - 'peak_power': Power S(f_0) at peak bin
-        - 'median_noise': Local median noise floor (mu_local)
-        - 'mad_std_noise': Scaled MAD estimate of local noise standard deviation (sigma_local)
+        - 'z_score': tail-equivalent Gaussian sigma: the z whose one-sided
+          Gaussian tail equals the exact chi2(2)/2 tail. Calibrated meaning.
+        - 'p_value': exact one-sided p = exp(-I0) (underflows to 0.0 if
+          I0 > ~745; see 'log_p_value').
+        - 'log_p_value': ln(p) = -I0, exact and free of underflow.
+        - 'I0': Poisson-normalized ordinate peak_power / mu_local.
+        - 'snr_peak_ratio': S_peak / median_noise (scale-free, unchanged).
+        - 'snr_excess_ratio': (S_peak - median_noise) / median_noise.
+        - 'snr_db': 10*log10(snr_peak_ratio).
+        - 'peak_freq', 'peak_power': bin used for the peak.
+        - 'mu_noise': local exponential floor scale (median / ln 2).
+        - 'median_noise', 'mad_std_noise': local median and MAD-sd
+          (diagnostics only; NOT used for significance).
+        - 'n_noise_bins': number of bins in the local noise window.
     """
+
+    print("Using non-Welch method for SNR calculation.")
     freqs = np.asarray(freqs)
     psd_signal = np.asarray(psd_signal)
 
-    # 1. Locate closest frequency bin to target analysis frequency
-    peak_idx = np.argmin(np.abs(freqs - analysis_freq))
+    # 1. Locate the frequency bin closest to the prespecified target
+    peak_idx = int(np.argmin(np.abs(freqs - analysis_freq)))
     actual_freq = freqs[peak_idx]
-    peak_power = psd_signal[peak_idx]
+    peak_power = float(psd_signal[peak_idx])
 
     # Frequency bin resolution
-    df = np.median(np.diff(freqs)) if len(freqs) > 1 else 1.0
-
-    # print("df: ", df)
+    df = float(np.median(np.diff(freqs))) if len(freqs) > 1 else 1.0
 
     if exclude_window is None:
         exclude_window = 2.0 * df
 
-    # 2. Define local window and exclusion masks
-    in_local_window = (freqs >= actual_freq - freq_window) & (freqs <= actual_freq + freq_window)
-    in_exclude_window = (freqs >= actual_freq - exclude_window) & (freqs <= actual_freq + exclude_window)
+    # 2. Local window and exclusion masks
+    in_local = (freqs >= actual_freq - freq_window) & (freqs <= actual_freq + freq_window)
+    in_exclude = (freqs >= actual_freq - exclude_window) & (freqs <= actual_freq + exclude_window)
 
-    # Noise region: inside local window, outside peak exclusion zone
-    noise_mask = in_local_window & (~in_exclude_window)
+    noise_mask = in_local & (~in_exclude)
+
     noise_psd = psd_signal[noise_mask]
 
-    # print("Len noise mask: ", np.sum(in_local_window), np.sum(in_exclude_window), len(psd_signal), len(freqs), len(noise_psd))
-    # print("Noise freqs: ", freqs[noise_mask])
+    print("noise  var: ", np.var(noise_psd))
     if len(noise_psd) < 3:
         raise ValueError(
             f"Insufficient background noise bins ({len(noise_psd)} found). "
             "Increase `freq_window` or decrease `exclude_window`."
         )
 
-    # 3. Calculate robust noise statistics
-    median_noise = np.median(noise_psd)
-    mad = np.median(np.abs(noise_psd - median_noise))
-    sigma_noise = 1.4826 * mad  # Normal consistency factor
+    # 3. Guard against averaged input: an averaged PSD has Gamma(K, 1/K)
+    #    ordinates (variance 1/K), the exponential test on it would be
+    #    severely conservative. Method-of-moments K_hat = mean^2 / var.
+    k_hat = float(np.mean(noise_psd) ** 2 / np.var(noise_psd))
+    if k_hat > 2.0:
+        warnings.warn(
+            f"Local ordinates look averaged (K_hat = {k_hat:.1f} > 2). "
+            "The exponential null is only valid for an UNAVERAGED "
+            "periodogram; p-values will be conservative. For Welch PSDs "
+            "use the Gamma(K, 1/K) tail with K = effective segment count.",
+            stacklevel=2,
+        )
 
-    # Avoid division by zero
-    sigma_noise = max(sigma_noise, 1e-12)
+    # 4. Robust floor under the Exp(mu) null: median = mu * ln(2).
+    #    The Gaussian MAD factor 1.4826 does not apply here: for Exp(mu),
+    #    MAD = mu * ln(phi) and sd = mu, so 1.4826 * MAD = 0.713 * sd.
+    median_noise = float(np.median(noise_psd))
+    mad = float(np.median(np.abs(noise_psd - median_noise)))
+    mad_std_noise = 1.4826 * mad            # diagnostic only
+    mu_noise = max(median_noise / np.log(2.0), 1e-12)
     median_noise = max(median_noise, 1e-12)
 
-    # 4. Compute metrics
-    z_score = (peak_power - median_noise) / sigma_noise
+    # 5. Exact chi2(2)/2 tail statistics
+    I0 = peak_power / mu_noise               # Exp(1) ordinate at the peak
+    log_p = -I0                              # ln p, exact, no underflow
+    p_value = float(np.exp(log_p))           # 0.0 if I0 > ~745
+    z_score = float(stats.norm.isf(p_value)) if p_value > 0.0 else float("inf")
+
+    # 6. Scale-free power ratios (unchanged semantics)
     snr_peak_ratio = peak_power / median_noise
     snr_excess_ratio = (peak_power - median_noise) / median_noise
     snr_db = 10.0 * np.log10(max(snr_peak_ratio, 1e-12))
 
     return {
-        'z_score': float(z_score),
+        'z_score': z_score,
+        'p_value': p_value,
+        'log_p_value': float(log_p),
+        'I0': float(I0),
         'snr_peak_ratio': float(snr_peak_ratio),
         'snr_excess_ratio': float(snr_excess_ratio),
         'snr_db': float(snr_db),
         'peak_freq': float(actual_freq),
-        'peak_power': float(peak_power),
-        'median_noise': float(median_noise),
-        'mad_std_noise': float(sigma_noise),
-        'n_noise_bins': int(len(noise_psd))
+        'peak_power': peak_power,
+        'mu_noise': float(mu_noise),
+        'median_noise': median_noise,
+        'mad_std_noise': float(mad_std_noise),
+        'n_noise_bins': int(len(noise_psd)),
     }
+
+# def calculate_spectral_snr_and_zscore(
+#     freqs: np.ndarray,
+#     psd_signal: np.ndarray,
+#     analysis_freq: float,
+#     freq_window: float,
+#     exclude_window: float = None
+# ) -> dict:
+#     """
+#     Calculates the robust Z-score and Peak-above-Median SNR for a specified target peak.
+#
+#     Parameters
+#     ----------
+#     freqs : np.ndarray
+#         1D array of frequency values (Hz).
+#     psd_signal : np.ndarray
+#         1D array of Power Spectral Density values corresponding to `freqs`.
+#     analysis_freq : float
+#         Target frequency of interest f_0 (e.g., beat frequency).
+#     freq_window : float
+#         Half-width of the local noise analysis window around analysis_freq.
+#         Local window spans [analysis_freq - freq_window, analysis_freq + freq_window].
+#     exclude_window : float, optional
+#         Half-width of the exclusion zone around analysis_freq to mask out the signal
+#         peak itself. Defaults to 2 * frequency_step if None.
+#
+#     Returns
+#     -------
+#     dict
+#         - 'z_score': Robust Z-score (peak height in standard deviations above median noise)
+#         - 'snr_peak_ratio': Ratio of peak power to median noise (S_peak / mu_local)
+#         - 'snr_excess_ratio': Relative excess power above median ((S_peak - mu_local) / mu_local)
+#         - 'snr_db': Peak ratio in dB (10 * log10(snr_peak_ratio))
+#         - 'peak_freq': Actual frequency bin location used for the peak
+#         - 'peak_power': Power S(f_0) at peak bin
+#         - 'median_noise': Local median noise floor (mu_local)
+#         - 'mad_std_noise': Scaled MAD estimate of local noise standard deviation (sigma_local)
+#     """
+#     freqs = np.asarray(freqs)
+#     psd_signal = np.asarray(psd_signal)
+#
+#     # 1. Locate closest frequency bin to target analysis frequency
+#     peak_idx = np.argmin(np.abs(freqs - analysis_freq))
+#     actual_freq = freqs[peak_idx]
+#     peak_power = psd_signal[peak_idx]
+#
+#     # Frequency bin resolution
+#     df = np.median(np.diff(freqs)) if len(freqs) > 1 else 1.0
+#
+#     if exclude_window is None:
+#         exclude_window = 2.0 * df
+#
+#     # 2. Define local window and exclusion masks
+#     in_local_window = (freqs >= actual_freq - freq_window) & (freqs <= actual_freq + freq_window)
+#     in_exclude_window = (freqs >= actual_freq - exclude_window) & (freqs <= actual_freq + exclude_window)
+#
+#     # Noise region: inside local window, outside peak exclusion zone
+#     noise_mask = in_local_window & (~in_exclude_window)
+#     noise_psd = psd_signal[noise_mask]
+#
+#     if len(noise_psd) < 3:
+#         raise ValueError(
+#             f"Insufficient background noise bins ({len(noise_psd)} found). "
+#             "Increase `freq_window` or decrease `exclude_window`."
+#         )
+#
+#     # 3. Noise statistics under the chi2_2/2 (exponential) null.
+#     #    For Exp(mu): median = mu*ln(2), hence mu = median/ln(2).
+#     #    MAD = mu*ln(phi) and sd = mu, so 1.4826*MAD = 0.713*sd).
+#     median_noise = np.median(noise_psd)
+#     mu_noise = median_noise / np.log(2.0)
+#
+#     # Avoid division by zero
+#     median_noise = max(median_noise, 1e-12)
+#     mu_noise = max(mu_noise, 1e-12)
+#
+#     # 4. Compute metrics: exact chi-squared tail instead of a Gaussian z.
+#     #    Single periodogram ordinate: I ~ Exp(1), p = exp(-I).
+#     #    Welch-averaged over n_avg segments: I ~ Gamma(n_avg, 1/n_avg);
+#     #    gamma.sf reduces to exp(-I) when n_avg = 1. In that case estimate
+#     #    the floor with np.mean(noise_psd) instead of the median.
+#     I = peak_power / mu_noise
+#     p_value = stats.gamma.sf(I, a=n_avg, scale=1.0 / n_avg)  # exact one-sided p
+#     z_score = stats.norm.isf(p_value)          # tail-equivalent Gaussian sigma
+#     snr_peak_ratio = peak_power / median_noise
+#     snr_excess_ratio = (peak_power - median_noise) / median_noise
+#     snr_db = 10.0 * np.log10(max(snr_peak_ratio, 1e-12))
+#     return {
+#         'z_score': float(z_score),
+#         'snr_peak_ratio': float(snr_peak_ratio),
+#         'snr_excess_ratio': float(snr_excess_ratio),
+#         'snr_db': float(snr_db),
+#         'peak_freq': float(actual_freq),
+#         'peak_power': float(peak_power),
+#         'median_noise': float(median_noise),
+#         'mad_std_noise': float(sigma_noise),
+#         'n_noise_bins': int(len(noise_psd))
+#     }
 
 
 def compute_SNR(freqs, psd_values, f):
@@ -901,6 +1190,10 @@ def plot_combined_single_cell_examples(fig_1_list, max_f=2200, tlim=[6, 6.2],
                                        carrier_zoom_margin=10.0,
                                        colors=None,
                                        psd_segments=None,
+                                       freq_resolution=0.005,
+                                       band_halfwidth=0.05,
+                                       freq_window=5.0,
+                                       mark_beat_band=False,
                                        fig_folder="figures",
                                        save_name="combined_single_cell_examples.png"):
     """Plot several single-cell simulations overlaid in one figure, in the
@@ -933,7 +1226,33 @@ def plot_combined_single_cell_examples(fig_1_list, max_f=2200, tlim=[6, 6.2],
     `len(fig_1_list)` long); otherwise the tab10 palette is used. Runs are
     obtained through run_single_cell_simulation, so cached results are reused;
     each entry must have been run with save_Vm=True (the default) for the Vm
-    panels to be available."""
+    panels to be available.
+
+    Spectra are estimated with Welch at a *fixed* frequency resolution
+    `freq_resolution` (Hz), i.e. nperseg = fs / freq_resolution, so the bin
+    width is identical for all entries regardless of their duration and longer
+    runs simply average more segments (set `freq_resolution=None` to fall back
+    to the old `psd_segments` behaviour, or to the plain periodogram if
+    `psd_segments` is None too). The SNR and z-score at the beat frequency are
+    computed from the power *integrated* over a band of half-width
+    `band_halfwidth` (Hz) around the line, compared with equally wide control
+    bands within +/- `freq_window` Hz (calculate_band_snr_and_zscore). Unlike
+    the peak-bin measure, this is invariant with respect to the frequency
+    resolution, so a finer or coarser df no longer changes the SNR value.
+
+    Note on the *visual* height of the beat peak: the beat is an essentially
+    infinitely narrow line, so its PSD value scales as 1/df while the (white)
+    shot-noise floor is independent of df. The peak's visibility above the
+    floor in the plotted spectrum is therefore always proportional to 1/df,
+    whatever units are plotted. To show the line as it really is, df must be
+    fine enough to resolve it; the default `freq_resolution` is therefore
+    small (0.005 Hz, i.e. 200 s segments - a 1000-5000 s recording still
+    averages 10-50 segments). Because the reported SNR/z-score are
+    band-integrated, they are unaffected by this choice, so the display
+    resolution can be made fine without inflating the statistics. With
+    `mark_beat_band` the integration band and the estimated noise level are
+    drawn in the beat-zoom panel, so the reader can judge the line against
+    its own noise floor rather than by eye alone."""
 
     n = len(fig_1_list)
     if colors is None:
@@ -943,8 +1262,8 @@ def plot_combined_single_cell_examples(fig_1_list, max_f=2200, tlim=[6, 6.2],
     plt.close("all")
     plt.rcParams["font.family"] = "DejaVu Serif"
     fig = plt.figure(figsize=(13, 13), facecolor="white")
-    gs = fig.add_gridspec(len(fig_1_list) + 2, 4, height_ratios=[1.0, 1.0] + [1.] * n, hspace=0.42,
-                          wspace=0.30, left=0.06, right=0.98,
+    gs = fig.add_gridspec(len(fig_1_list) + 2, 4, height_ratios=[1.0, 1.0] + [1.] * n,
+                          hspace=0.42, wspace=0.30, left=0.06, right=0.98,
                           top=0.96, bottom=0.04)
 
     ax_vm = fig.add_subplot(gs[0, :])
@@ -956,14 +1275,15 @@ def plot_combined_single_cell_examples(fig_1_list, max_f=2200, tlim=[6, 6.2],
     slot = (band_hi - band_lo) / max(n, 1)
 
     fr_for_inset = []   # (freqs, psd, color) collected for the carrier zoom
+    beat_stats = []     # (sim_name, color, band-SNR result) for the beat zoom
     carriers = None
     handles, labels = [], []
 
     for row, sim_params in enumerate(fig_1_list):
         ax_vm_psd = fig.add_subplot(gs[row + 1, :2], xlim=[1, max_f], xlabel="frequency [Hz]",
-                                    ylabel=r"PSD [$\mathrm{mV}^2/\mathrm{Hz}$]", ylim=[1e-5, 1e1])
+                                    ylabel=r"PSD [$\mathrm{mV}^2/\mathrm{Hz}$]", ylim=[1e-6, 1e1])
         ax_fr_psd = fig.add_subplot(gs[row + 1, 2:], xlim=[1, max_f], xlabel="frequency [Hz]",
-                                    ylabel=r"PSD [$\mathrm{spikes}^2/\mathrm{Hz}$]", ylim=[1e-1, 1e3])
+                                    ylabel=r"PSD [$\mathrm{spikes}^2/\mathrm{Hz}$]", ylim=[3e0, 1e3])
 
         results = run_single_cell_simulation(**sim_params)
 
@@ -981,31 +1301,43 @@ def plot_combined_single_cell_examples(fig_1_list, max_f=2200, tlim=[6, 6.2],
         # --- Spectra ----------------------------------------------------------
         spike_rate, t_bins = find_spike_rate(
             results["spike_times"], firing_rate_bin_size, sim_time)
-        if psd_segments is None:
+        fs_fr = 1000 / sim_params["resolution"]
+        if freq_resolution is not None:
+            freqs_fr, fr_psd = welch_psd_fixed_resolution(
+                spike_rate, fs_fr, freq_resolution=freq_resolution)
+        elif psd_segments is None:
             freqs_fr, fr_psd = return_freq_and_psd(t_bins, spike_rate)
             fr_psd = fr_psd[0]
         else:
             freqs_fr, fr_psd = welch(spike_rate,
-                                     fs=1000 / sim_params["resolution"],
+                                     fs=fs_fr,
                                      nperseg=len(spike_rate) // psd_segments,
                                       noverlap=(len(spike_rate) // psd_segments) // 2)
 
-        # fr_SNR = compute_SNR(freqs_fr, fr_psd, stim_freq)
-        fr_SNR_res = calculate_spectral_snr_and_zscore(freqs_fr, fr_psd, stim_freq, freq_window=5)
-        fr_SNR = fr_SNR_res['snr_peak_ratio']
+        # Band-integrated SNR/z-score (resolution independent, see
+        # calculate_band_snr_and_zscore).
+        fr_SNR_res = calculate_band_snr_and_zscore(
+            freqs_fr, fr_psd, stim_freq, band_halfwidth=band_halfwidth,
+            freq_window=freq_window)
+        fr_SNR = fr_SNR_res['snr_band_ratio']
         fr_z_score = fr_SNR_res['z_score']
 
         if have_vm:
             fs = 1000 / sim_params["resolution"]
-            if psd_segments is None:
+            if freq_resolution is not None:
+                freqs_vm, vm_psd = welch_psd_fixed_resolution(
+                    results["Vm"], fs, freq_resolution=freq_resolution)
+            elif psd_segments is None:
                 freqs_vm, vm_psd = return_freq_and_psd(results["times"], results["Vm"])
                 vm_psd = vm_psd[0]
             else:
                 freqs_vm, vm_psd = welch(results["Vm"], fs=fs, nperseg=len(results["Vm"]) // psd_segments,
                                           noverlap=(len(results["Vm"]) // psd_segments) // 2)
-            vm_SNR_res = calculate_spectral_snr_and_zscore(freqs_vm, vm_psd, stim_freq, freq_window=5)
+            vm_SNR_res = calculate_band_snr_and_zscore(
+                freqs_vm, vm_psd, stim_freq, band_halfwidth=band_halfwidth,
+                freq_window=freq_window)
             vm_z_score = vm_SNR_res['z_score']
-            vm_SNR = vm_SNR_res['snr_peak_ratio']
+            vm_SNR = vm_SNR_res['snr_band_ratio']
 
         #ax_fr_psd.set_title(f"{sim_name} - PSD of fr: SNR at {stim_freq:.0f} Hz = {fr_SNR:.2f}; z-score = {fr_z_score:.2f}")
 
@@ -1015,10 +1347,18 @@ def plot_combined_single_cell_examples(fig_1_list, max_f=2200, tlim=[6, 6.2],
             vm_title += f", STD(Vm) {np.std(results['Vm']):.2f} mV"
         print(vm_title)
         if have_vm:
-            print(f"{sim_name} - PSD of Vm: SNR at {stim_freq:.0f} Hz = "
-                  f"{vm_SNR:.2f}")
-        print(f"{sim_name} - PSD of firing rate: SNR at {stim_freq:.0f} Hz = "
-              f"{fr_SNR:.2f}")
+            print(f"{sim_name} - PSD of Vm: band SNR at {stim_freq:.0f} Hz = "
+                  f"{vm_SNR:.2f} (z = {vm_z_score:.1f}, "
+                  f"p = {vm_SNR_res['p_value']:.3g}, "
+                  f"df = {vm_SNR_res['df']:.3g} Hz, "
+                  f"{vm_SNR_res['n_band_bins']} band bins, "
+                  f"{vm_SNR_res['n_control_bands']} control bands)")
+        print(f"{sim_name} - PSD of firing rate: band SNR at {stim_freq:.0f} Hz = "
+              f"{fr_SNR:.2f} (z = {fr_z_score:.1f}, "
+              f"p = {fr_SNR_res['p_value']:.3g}, "
+              f"df = {fr_SNR_res['df']:.3g} Hz, "
+              f"{fr_SNR_res['n_band_bins']} band bins, "
+              f"{fr_SNR_res['n_control_bands']} control bands)")
 
         # --- Top panel: overlaid Vm traces + per-entry spike raster ----------
         if have_vm:
@@ -1047,6 +1387,7 @@ def plot_combined_single_cell_examples(fig_1_list, max_f=2200, tlim=[6, 6.2],
         if len(f_values) == 2:
             carriers = sorted(float(f) for f in f_values)
             fr_for_inset.append((freqs_fr[mask], fr_psd[mask], color))
+        beat_stats.append((sim_name, color, fr_SNR_res))
 
         # --- Spectral-panel styling ----------------------------------------------
         for ax in (ax_vm_psd, ax_fr_psd):
@@ -1115,6 +1456,17 @@ def plot_combined_single_cell_examples(fig_1_list, max_f=2200, tlim=[6, 6.2],
             ax_vm_zoom_2.set_xlim(lo_carrier, hi_carrier)
             ax_fr_zoom_2.plot(freqs_fr[m_carrier_fr], fr_psd[m_carrier_fr], color=color)
             ax_fr_zoom_2.set_xlim(lo_carrier, hi_carrier)
+
+        # Mark the integration band and the estimated noise floor, so the beat
+        # line can be judged against its own noise level instead of by eye.
+        if mark_beat_band and beat_stats:
+            f_lo, f_hi = beat_stats[0][2]['band_freqs']
+            ax_fr_zoom_1.axvspan(f_lo, f_hi, color=_NB_CARRIER, alpha=0.12, lw=0)
+            for sim_name, color, res in beat_stats:
+                n_bins = max(res['n_band_bins'], 1)
+                noise_level = res['noise_power'] / (n_bins * res['df'])
+                ax_fr_zoom_1.axhline(noise_level, color=color, ls="--",
+                                     dashes=(3, 3), lw=0.9)
 
         # for c in carriers:
         #     axin.axvline(c, ls="--", dashes=(2, 4), lw=0.9, color=_NB_CARRIER)
@@ -1227,7 +1579,7 @@ if __name__ == "__main__":
 
     dt = 0.025
     force_rerun = False
-    welch_segments = 8
+    welch_segments = 4
     # noise_type = "multisine"
     # noise_type = "gaussian"
     # noise_type = "syn_noise"
@@ -1445,17 +1797,17 @@ if __name__ == "__main__":
     sim_params_list = [sim_params_S0_ou, sim_params_S1, sim_params_S2, sim_params_S3]
     fig_1_list = [sim_params_1ABC, sim_params_1DEF, sim_params_1GHI, sim_params_1JKL]
 
-    for sim_params in [sim_params_noisy]: #sim_params_list:#fig_1_list:
-       results = run_single_cell_simulation(**sim_params)
-       if sim_params["sim_name"].startswith("FigS2"):
-           tlim = [5, 5.01]
-       elif sim_params["sim_name"].startswith("FigS3b"):
-           tlim = [5, 5.05]
-       else:
-           tlim = [3.8, 4.2]
-#
-       plot_single_cell_results(results, sim_params, use_welch=False,
-                                welch_segments=welch_segments, tlim=tlim)
+#     for sim_params in [sim_params_noisy]: #sim_params_list:#fig_1_list:
+#        results = run_single_cell_simulation(**sim_params)
+#        if sim_params["sim_name"].startswith("FigS2"):
+#            tlim = [5, 5.01]
+#        elif sim_params["sim_name"].startswith("FigS3b"):
+#            tlim = [5, 5.05]
+#        else:
+#            tlim = [3.8, 4.2]
+# #
+#        plot_single_cell_results(results, sim_params, use_welch=True,
+#                                 welch_segments=welch_segments, tlim=tlim)
 
     #plot_Vm_histogram([sim_params_S0_ou, sim_params_S0_gauss])
     # for psd_segments in [None, 1, 2, 4, 8, 10, 16]:
@@ -1465,10 +1817,16 @@ if __name__ == "__main__":
     #                                       psd_segments=psd_segments,
     #                                       tlim=[3.8, 4.200],
     #                                       save_name=f"Fig1_combined_{psd_segments}psd_segments.pdf")
-    # plot_combined_single_cell_examples(fig_1_list,
-    #                                   psd_segments=4,
-    #                                   firing_rate_bin_size=dt,
-    #                                   tlim = [3.800, 4.200],
-    #                                   save_name=f"Fig1_combined_{4}psd_segments.pdf")
+
+    # Fixed frequency resolution (df) + band-integrated SNR/z-score, which is
+    # independent of df (see calculate_band_snr_and_zscore).
+    freq_resolution = 0.005
+    band_halfwidth = 0.05
+    plot_combined_single_cell_examples(fig_1_list,
+                                      freq_resolution=freq_resolution,
+                                      band_halfwidth=band_halfwidth,
+                                      firing_rate_bin_size=dt,
+                                      tlim = [3.800, 4.200],
+                                      save_name=f"Fig1_combined_df{freq_resolution}_band{band_halfwidth}.pdf")
 
     # plot_compare_Vms(fig_1_list)

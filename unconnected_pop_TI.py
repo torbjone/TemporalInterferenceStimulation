@@ -32,7 +32,7 @@ from single_cell_simulations import (
     find_ou_noise_std,
     find_spike_rate,
     return_freq_and_psd,
-    calculate_spectral_snr_and_zscore,
+    calculate_non_welch_snr_and_zscore,
     compute_SNR,
     simplify_axes,
     mark_subplots,
@@ -499,7 +499,8 @@ def plot_network_results(results, sim_params,
     return fig
 
 
-def analyze_pop_size_duration(results, pop_sizes, durations, analysis_freq,
+def analyze_pop_size_duration(results, pop_sizes, durations,
+                              analysis_freq,
                               bin_size, freq_window=5):
     """SNR and z-score of the population firing rate at `analysis_freq` (Hz)
     for every combination of population size and simulation duration.
@@ -551,7 +552,7 @@ def analyze_pop_size_duration(results, pop_sizes, durations, analysis_freq,
 
             freqs, psd = return_freq_and_psd(bin_size, pop_rate)
             try:
-                res = calculate_spectral_snr_and_zscore(
+                res = calculate_non_welch_snr_and_zscore(
                     freqs, psd[0], analysis_freq, freq_window=freq_window)
             except ValueError as e:
                 print(f"n={n}, T={T} s: {e}")
@@ -699,7 +700,7 @@ def plot_spike_histogram(sim_params):
 
 if __name__ == "__main__":
 
-    target_stim_dVm = 0.0
+    target_stim_dVm = 0.03
     dt = 0.025
     carrier_f = 2000
     beat_f = 20

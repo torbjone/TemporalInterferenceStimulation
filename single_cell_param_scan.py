@@ -25,39 +25,91 @@ from single_cell_simulations import (
     return_freq_and_psd,
     compute_SNR,
     calculate_spectral_snr_and_zscore,
+    welch_psd_fixed_resolution,
+    calculate_band_snr_and_zscore,
     simplify_axes,
     plot_single_cell_results, mark_subplots,
 )
 
 def analyze_firing_rate(results, sim_time, analysis_freq, bin_size,
-                        use_welch=False, welch_segments=10,):
+                        use_welch=False, welch_segments=10,
+                        freq_resolution=0.005, band_halfwidth=0.05,
+                        freq_window=5.0, ref_bandwidth=0.01):
     """From a simulation `results` dict, return the firing-rate power and SNR
-    at `analysis_freq` (Hz), computed the same way as plot_single_cell_results:
-    bin the spikes into a rate, take its PSD, and read off the value / SNR at
-    the frequency bin nearest `analysis_freq`."""
-    spike_rate, t_bins = find_spike_rate(results["spike_times"], bin_size, sim_time)
+    at `analysis_freq` (Hz): bin the spikes into a rate, take its PSD, and
+    quantify the spectral line at `analysis_freq`.
 
-    if use_welch:
+    By default the PSD is a Welch estimate with a *fixed* frequency resolution
+    `freq_resolution` (Hz), i.e. nperseg = fs / freq_resolution, so the bin
+    width df is identical for every grid point and every simulation length
+    (longer runs average more segments instead of giving a finer df). The line
+    is then quantified by its power *integrated* over a band of half-width
+    `band_halfwidth` (Hz) around `analysis_freq`, compared with equally wide
+    control bands within +/- `freq_window` Hz
+    (calculate_band_snr_and_zscore). Unlike the peak-bin measure, both the
+    returned power and the SNR/z-score are then invariant with respect to df,
+    so the numbers are directly comparable across the whole scan and across
+    figures.
+
+    Set `freq_resolution=None` to fall back to the old behaviour: a Welch PSD
+    with `welch_segments` segments (`use_welch=True`) or a plain periodogram,
+    and the peak-bin SNR of calculate_spectral_snr_and_zscore.
+
+    The reported SNR ('snr_ref') is the band-integrated line power divided by
+    the noise power in a *fixed* reference bandwidth `ref_bandwidth` (Hz),
+    rather than by the noise in the integration band. Dividing by the noise in
+    the integration band ('snr_band_ratio') bounds the ratio by
+    1 + P_line/(N0*B_band) and, with B_band = 0.105 Hz, compresses everything
+    into 1-2; using a fixed, explicitly stated B_ref keeps the measure
+    df-invariant while preserving the dynamic range. B_ref must be given in
+    the figure caption.
+
+    Returns (power, snr_old, snr_res), where `power` is the band-integrated
+    excess (line) power in (spikes/s)^2 in band mode and the raw PSD value at
+    the nearest bin in the fallback mode."""
+    spike_rate, t_bins = find_spike_rate(results["spike_times"], bin_size, sim_time)
+    fs_fr = 1000 / bin_size
+
+    if freq_resolution is not None:
+        freqs, psd = welch_psd_fixed_resolution(
+            spike_rate, fs_fr, freq_resolution=freq_resolution)
+    elif use_welch:
         # Sampling rate (measurements per sec)
-        fs_fr = 1000 / bin_size
         freqs, psd = welch(spike_rate, fs=fs_fr, nperseg=len(spike_rate) // welch_segments,
                                   noverlap=(len(spike_rate) // welch_segments) // 2)
     else:
         freqs, psd = return_freq_and_psd(t_bins, spike_rate)
         psd = psd[0]
 
-    arg_f = np.argmin(np.abs(freqs - analysis_freq))
-    power = psd[arg_f]
     snr = compute_SNR(freqs, psd, analysis_freq)
-    snr2 = calculate_spectral_snr_and_zscore(freqs, psd, analysis_freq, freq_window=5)
+
+    if freq_resolution is not None:
+        snr2 = calculate_band_snr_and_zscore(
+            freqs, psd, analysis_freq, band_halfwidth=band_halfwidth,
+            freq_window=freq_window, ref_bandwidth=ref_bandwidth)
+        power = snr2["excess_power"]
+    else:
+        arg_f = np.argmin(np.abs(freqs - analysis_freq))
+        power = psd[arg_f]
+        snr2 = calculate_spectral_snr_and_zscore(freqs, psd, analysis_freq,
+                                                 freq_window=freq_window)
+        snr2["snr_band_ratio"] = snr2["snr_peak_ratio"]
+        snr2["snr_ref"] = snr2["snr_peak_ratio"]
 
     return power, snr, snr2
 
 
 def run_param_scan(target_stim_dVms, noise_level_Vms, const_params,
                    analysis_freq=20.0, firing_rate_bin_size=None,
-                   save_dir="results/param_scan", use_welch=False, welch_segments=8,):
+                   save_dir="results/param_scan", use_welch=False, welch_segments=8,
+                   freq_resolution=0.005, band_halfwidth=0.05,
+                   freq_window=5.0, ref_bandwidth=0.01):
     """Run the 2D scan and return (firing_rate, fr_power, fr_SNR) matrices.
+
+    `fr_SNR` holds the band-integrated line power divided by the noise power in
+    the fixed reference bandwidth `ref_bandwidth` (Hz), i.e. 'snr_ref' of
+    calculate_band_snr_and_zscore - see analyze_firing_rate for why the ratio
+    against the integration band is unsuitable as a display quantity.
 
     Each matrix has shape (len(noise_level_Vms), len(target_stim_dVms)) so that
     rows index the noise level (y-axis) and columns the stimulation strength
@@ -97,22 +149,65 @@ def run_param_scan(target_stim_dVms, noise_level_Vms, const_params,
             power, snr, snr2 = analyze_firing_rate(
                 results, const_params["sim_time"], analysis_freq,
                 bin_size=firing_rate_bin_size,  use_welch=use_welch,
-                welch_segments=welch_segments)
+                welch_segments=welch_segments,
+                freq_resolution=freq_resolution,
+                band_halfwidth=band_halfwidth,
+                freq_window=freq_window,
+                ref_bandwidth=ref_bandwidth)
 
             firing_rate[i, j] = results["firing_rate"]
             fr_power[i, j] = power
-            fr_SNR[i, j] = snr2["snr_peak_ratio"]
+            fr_SNR[i, j] = snr2["snr_ref"]
             fr_z_score[i, j] = snr2["z_score"]
-            print("comparison old, new SNR: ", snr, snr2["snr_peak_ratio"])
+            print("comparison old, ref SNR: ", snr, snr2["snr_ref"])
             print("z_score: ", snr2["z_score"])
 
     return firing_rate, fr_power, fr_SNR, fr_z_score
 
 
+def snr_ref_from_band_ratio(snr_band_ratio, band_halfwidth=0.05,
+                            freq_resolution=0.005, ref_bandwidth=0.01):
+    """Convert a stored `snr_band_ratio` matrix to the fixed-reference-bandwidth
+    SNR ('snr_ref'), so old scan matrices can be re-plotted without re-running.
+
+    With B_band = n_band_bins * df the identity is
+        snr_ref = (snr_band_ratio - 1) * B_band / B_ref,
+    since snr_band_ratio - 1 = P_line / (N0 * B_band)."""
+    n_band = 2 * int(np.floor(band_halfwidth / freq_resolution)) + 1
+    b_band = n_band * freq_resolution
+    return (np.asarray(snr_band_ratio, dtype=float) - 1.0) * b_band / ref_bandwidth
+
+
+def _octave_levels(matrix, lo_floor=None, n_min=5, n_max=9):
+    """Octave-spaced (factor-2) contour levels spanning the finite, positive
+    values of `matrix`, for use with a logarithmic colour scale.
+
+    `lo_floor` optionally clamps the lowest level from below (e.g. 1.0 for an
+    SNR ratio, for which 1 means "pure noise"). At most `n_max` octaves are
+    kept, counted down from the top, so a few near-zero grid points do not
+    stretch the colour scale over a dozen decades."""
+    vals = np.asarray(matrix, dtype=float)
+    vals = vals[np.isfinite(vals) & (vals > 0)]
+    if vals.size == 0:
+        return np.array([1.0, 2.0])
+    lo = np.min(vals)
+    if lo_floor is not None:
+        lo = max(lo, lo_floor)
+    hi = max(np.max(vals), lo * 2)
+    e_lo = int(np.floor(np.log2(lo)))
+    e_hi = int(np.ceil(np.log2(hi)))
+    while e_hi - e_lo + 1 < n_min:
+        e_hi += 1
+    if e_hi - e_lo + 1 > n_max:
+        e_lo = e_hi - n_max + 1
+    return 2.0**np.arange(e_lo, e_hi + 1)
+
+
 def plot_param_scan(firing_rate, fr_power, fr_SNR, fr_z_score,
                     target_stim_dVms, noise_level_Vms,
                     analysis_freq=20.0, save_name="param_scan.png",
-                    snr_levels=None, n_levels=14):
+                    snr_levels=None, fr_power_levels=None, n_levels=14,
+                    ref_bandwidth=0.01):
     """Plot the three scan matrices as filled contour panels (contourf).
 
     Noise level is placed on the x-axis and target stim dVm on the y-axis. The
@@ -123,14 +218,19 @@ def plot_param_scan(firing_rate, fr_power, fr_SNR, fr_z_score,
     colour scale is matched to them, with labelled contour lines overlaid); it
     defaults to a log-spaced set if not given. The firing-rate and power panels
     use `n_levels` automatically-placed levels."""
+    # Octave-spaced levels spanning the finite, positive part of the data.
+    # Both matrices are now resolution-independent band-integrated measures
+    # (see analyze_firing_rate), but their absolute scale still depends on the
+    # firing rate and the stimulation strength, so the levels are derived from
+    # the data rather than hard-coded.
     if snr_levels is None:
-        snr_levels = [5, 10, 20, 40, 80, 160, 320, 640]
-
-    # Log-spaced power levels spanning the data (in decades), since the PSD
-    # value at a spectral line scales with the simulation duration.
-    fr_pos = np.abs(fr_power[np.isfinite(fr_power) & (fr_power != 0)])
-    fr_levels = 2**np.arange(12)#np.logspace(1, 3, 10)
-    snr_levels =  [2, 4, 8, 16, 32, 64, 128,]#np.asarray(snr_levels, dtype=float)
+        # snr_ref = 0 means "no line", so (unlike the band ratio) there is no
+        # natural floor at 1; the level range is capped by _octave_levels.
+        snr_levels = _octave_levels(fr_SNR)
+    if fr_power_levels is None:
+        fr_power_levels = _octave_levels(fr_power)
+    fr_levels = np.asarray(fr_power_levels, dtype=float)
+    snr_levels = np.asarray(snr_levels, dtype=float)
     z_score_levels = np.logspace(0., 3, 10)
     print(f"z_score_levels: {z_score_levels}")
 
@@ -144,8 +244,10 @@ def plot_param_scan(firing_rate, fr_power, fr_SNR, fr_z_score,
     # a logarithmic colour scale; the others use automatic linear levels.
     panels = [
         (firing_rate, "Firing rate (Hz)", n_levels, False, "Hz"),
-        (fr_power, f"Firing-rate power at {analysis_freq:.0f} Hz", fr_levels, True, "|firing rate|²/Hz"),
-        (fr_SNR, f"Firing-rate SNR at {analysis_freq:.0f} Hz", snr_levels, True, ''),
+        (fr_power, f"Firing-rate power at {analysis_freq:.0f} Hz", fr_levels, True, "(spikes/s)²"),
+        (fr_SNR, f"Firing-rate SNR at {analysis_freq:.0f} Hz\n"
+                 f"(B$_\\mathrm{{ref}}$ = {ref_bandwidth:g} Hz)",
+         snr_levels, True, ''),
         # (fr_z_score, "z-score for peak at beat frequency", z_score_levels,True, ''),
     ]
 
@@ -175,7 +277,7 @@ def plot_param_scan(firing_rate, fr_power, fr_SNR, fr_z_score,
         if log_scale:
            cbar = fig.colorbar(cf, ax=ax, fraction=0.046, pad=0.04)
            cbar.set_ticks(levels)
-           cbar.set_ticklabels([f"{l}" for l in levels])
+           cbar.set_ticklabels([f"{l:g}" for l in levels])
 
         else:
            cbar = fig.colorbar(cf, ax=ax, fraction=0.046, pad=0.04, label="")
@@ -215,15 +317,29 @@ if __name__ == "__main__":
     target_stim_dVms = np.linspace(0, 1, 11)   # mV
     noise_level_Vms = np.linspace(3, 15, 25)   # mV
 
-    rerun_scan = True
+    rerun_scan = False
     welch_segments = 4
     use_welch = True
-    welch_addon = f"_welch_{welch_segments}" if use_welch else ""
+    # Fixed frequency resolution (df) + band-integrated SNR/z-score, which is
+    # independent of df (see calculate_band_snr_and_zscore), as in Fig. 1.
+    freq_resolution = 0.005
+    band_halfwidth = 0.05
+    # Reference noise bandwidth for the SNR panel (must be stated in the
+    # caption); the line power is compared with the noise power in B_ref.
+    ref_bandwidth = 0.01
+    if freq_resolution is not None:
+        welch_addon = f"_df{freq_resolution}_band{band_halfwidth}"
+    else:
+        welch_addon = f"_welch_{welch_segments}" if use_welch else ""
 
     if rerun_scan:
         firing_rate, fr_power, fr_SNR, fr_z_score = run_param_scan(
             target_stim_dVms, noise_level_Vms, const_params,
-            analysis_freq=analysis_freq, use_welch=use_welch, welch_segments=welch_segments,)
+            analysis_freq=analysis_freq, use_welch=use_welch,
+            welch_segments=welch_segments,
+            freq_resolution=freq_resolution,
+            band_halfwidth=band_halfwidth,
+            ref_bandwidth=ref_bandwidth,)
 
         # Store the matrices (with their axes) for later reuse.
         os.makedirs("results/param_scan", exist_ok=True)
@@ -233,6 +349,7 @@ if __name__ == "__main__":
                  firing_rate=firing_rate,
                  fr_power=fr_power,
                  fr_SNR=fr_SNR,
+                 ref_bandwidth=ref_bandwidth,
                  analysis_freq=analysis_freq,
                  fr_z_score=fr_z_score,)
     else:
@@ -246,9 +363,21 @@ if __name__ == "__main__":
             fr_SNR = data["fr_SNR"]
             analysis_freq = float(data["analysis_freq"],)
             fr_z_score = data["fr_z_score"]
+            stored_ref_bandwidth = (float(data["ref_bandwidth"])
+                                    if "ref_bandwidth" in data else None)
         print(f"Loaded scan matrices from '{matrix_path}'")
+        if stored_ref_bandwidth is None and freq_resolution is not None:
+            # Older files stored snr_band_ratio; convert to the fixed-reference
+            # bandwidth SNR instead of re-running the scan.
+            fr_SNR = snr_ref_from_band_ratio(
+                fr_SNR, band_halfwidth=band_halfwidth,
+                freq_resolution=freq_resolution,
+                ref_bandwidth=ref_bandwidth)
+            print(f"Converted stored snr_band_ratio to snr_ref "
+                  f"(B_ref = {ref_bandwidth} Hz)")
 
     plot_param_scan(firing_rate, fr_power, fr_SNR, fr_z_score,
                     target_stim_dVms, noise_level_Vms,
                     analysis_freq=analysis_freq,
+                    ref_bandwidth=ref_bandwidth,
                     save_name=f"param_scan_dt{dt}{welch_addon}.pdf")

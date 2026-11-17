@@ -31,7 +31,9 @@ from single_cell_simulations import (
     find_noise_std,
     find_spike_rate,
     return_freq_and_psd,
-    calculate_spectral_snr_and_zscore,
+    calculate_non_welch_snr_and_zscore,
+    calculate_band_snr_and_zscore,
+    welch_psd_fixed_resolution,
     compute_SNR,
     simplify_axes,
     mark_subplots,
@@ -701,30 +703,48 @@ def plot_results(results, sim_params, tlim=(5, 6), max_f=2200,
         freqs_fr, psd_fr = return_freq_and_psd(b_bins, b_rate)
         psd_fr = psd_fr[0]
 
-    snr_res = calculate_spectral_snr_and_zscore(freqs_fr, psd_fr, stim_freq, freq_window=5)
+    snr_res = calculate_non_welch_snr_and_zscore(freqs_fr, psd_fr, stim_freq, freq_window=5)
     snr_fr  = snr_res["snr_peak_ratio"]
     print(f"Neuron B firing rate : {B['firing_rate']:.2f} Hz")
     print(f"Firing-rate SNR @ {stim_freq:.0f} Hz: {snr_fr:.2f}  (z={snr_res['z_score']:.1f})")
 
     # Also compute population drive PSD for reference
+
+    print(results["pop"])
+
     pop_E   = results["pop"]["E"]
-    net_drive  = pop_E["population_rate"]
-    net_times  = pop_E["population_rate_times"]
-    print(pop_E)
+    net_drive_E  = pop_E["population_rate"]
+    net_times_E  = pop_E["population_rate_times"]
+
+    # pop_I   = results["pop"]["I"]
+    # net_drive_I  = pop_E["population_rate"]
+    # net_times_I  = pop_E["population_rate_times"]
+
+
+    # print(pop_E)
 
     if use_welch:
         fs_pop = 1000.0 / firing_rate_bin_size
-        freqs_pop, psd_pop = welch(net_drive, fs=fs_pop,
-                                   nperseg=len(net_drive) // welch_segments,
-                                   noverlap=(len(net_drive) // welch_segments) // 2)
+        freqs_pop_E, psd_pop_E = welch(net_drive_E, fs=fs_pop,
+                                   nperseg=len(net_drive_E) // welch_segments,
+                                   noverlap=(len(net_drive_E) // welch_segments) // 2)
+        # freqs_pop_I, psd_pop_I = welch(net_drive_I, fs=fs_pop,
+        #                            nperseg=len(net_drive_I) // welch_segments,
+        #                            noverlap=(len(net_drive_I) // welch_segments) // 2)
     else:
-        freqs_pop, psd_pop = return_freq_and_psd(net_times, net_drive)
-        psd_pop = psd_pop[0]
-    snr_pop = calculate_spectral_snr_and_zscore(freqs_pop, psd_pop, stim_freq, freq_window=5)
-    print(f"Population drive SNR @ {stim_freq:.0f} Hz: {snr_pop['snr_peak_ratio']:.2f}")
+        freqs_pop_E, psd_pop_E = return_freq_and_psd(net_times_E, net_drive_E)
+        psd_pop_E = psd_pop_E[0]
+        # freqs_pop_I, psd_pop_I = return_freq_and_psd(net_times_I, net_drive_I)
+        # psd_pop_I = psd_pop_I[0]
+
+    snr_pop_E = calculate_non_welch_snr_and_zscore(freqs_pop_E, psd_pop_E, stim_freq, freq_window=5)
+    # snr_pop_I = calculate_non_welch_snr_and_zscore(freqs_pop_I, psd_pop_I, stim_freq, freq_window=5)
+    print(f"Population E drive SNR @ {stim_freq:.0f} Hz: {snr_pop_E['snr_peak_ratio']:.2f}")
+    # print(f"Population I drive SNR @ {stim_freq:.0f} Hz: {snr_pop_I['snr_peak_ratio']:.2f}")
 
     # Vm PSD
     if have_Vm:
+        print("Has Vm")
         fs_vm = 1000.0 / results["params"]["resolution"]
         if use_welch:
             freqs_vm, psd_vm = welch(B["Vm"], fs=fs_vm,
@@ -733,7 +753,7 @@ def plot_results(results, sim_params, tlim=(5, 6), max_f=2200,
         else:
             freqs_vm, psd_vm = return_freq_and_psd(B["times"], B["Vm"])
             psd_vm = psd_vm[0]
-        snr_vm = calculate_spectral_snr_and_zscore(freqs_vm, psd_vm, stim_freq, freq_window=5)
+        snr_vm = calculate_non_welch_snr_and_zscore(freqs_vm, psd_vm, stim_freq, freq_window=5)
         print(f"Vm SNR @ {stim_freq:.0f} Hz: {snr_vm['snr_peak_ratio']:.2f}")
 
     # --- Figure ---
@@ -752,30 +772,31 @@ def plot_results(results, sim_params, tlim=(5, 6), max_f=2200,
 
     t_ = t_[tmask]
 
-    pre_psds = []
+    # pre_psds = []
+    #
+    # for idx, id in enumerate(pop_E['recorded_ids']):
+    #     vm_ = pop_E["Vm"][idx][tmask]
+    #     vm_ -= np.mean(vm_)
+    #     ax_vm.plot(t_, vm_ / vm_norm + 2 * idx, "k", lw=0.6)
+    #
+    #     spike_times = pop_E['spike_times'][id]
+    #     print(f"From {idx}, {id}, we have {len(spike_times)} spikes")
+    #     fr, t_bins = find_spike_rate(spike_times, firing_rate_bin_size, sim_time)
+    #     if use_welch:
+    #         fs_pre = 1000.0 / firing_rate_bin_size
+    #         freqs_pre, psd_pre = welch(fr, fs=fs_pre,
+    #                                    nperseg=len(fr) // welch_segments,
+    #                                    noverlap=(len(fr) // welch_segments) // 2)
+    #     else:
+    #         freqs_pre, psd_pre = return_freq_and_psd(fr, t_bins)
+    #         psd_pre = psd_pre[0]
+    #     pre_psds.append(psd_pre)
+    #
+    #     snr_pre = calculate_non_welch_snr_and_zscore(freqs_pre, psd_pre, stim_freq, freq_window=5)
+    #
+    #     print(f"Single-cell presynaptic drive SNR @ {stim_freq:.0f} Hz: {snr_pre['snr_peak_ratio']:.2f}")
 
-    for idx, id in enumerate(pop_E['recorded_ids']):
-        vm_ = pop_E["Vm"][idx][tmask]
-        vm_ -= np.mean(vm_)
-        ax_vm.plot(t_, vm_ / vm_norm + 2 * idx, "k", lw=0.6)
-
-        spike_times = pop_E['spike_times'][id]
-        fr, t_bins = find_spike_rate(spike_times, firing_rate_bin_size, sim_time)
-        if use_welch:
-            fs_pre = 1000.0 / firing_rate_bin_size
-            freqs_pre, psd_pre = welch(fr, fs=fs_pre,
-                                       nperseg=len(fr) // welch_segments,
-                                       noverlap=(len(fr) // welch_segments) // 2)
-        else:
-            freqs_pre, psd_pre = return_freq_and_psd(fr, t_bins)
-            psd_pre = psd_pre[0]
-        pre_psds.append(psd_pre)
-
-        snr_pre = calculate_spectral_snr_and_zscore(freqs_pre, psd_pre, stim_freq, freq_window=5)
-
-        print(f"Single-cell presynaptic drive SNR @ {stim_freq:.0f} Hz: {snr_pre['snr_peak_ratio']:.2f}")
-
-    pre_psds = np.mean(pre_psds, axis=0)
+    # pre_psds = np.mean(pre_psds, axis=0)
 
     b_ = B["Vm"][tmask]
     b_ -= np.mean(b_)
@@ -806,12 +827,16 @@ def plot_results(results, sim_params, tlim=(5, 6), max_f=2200,
     # ax.set_yticks([1]); ax.set_yticklabels(["B"])
 
     # # Firing-rate PSD (full log-log)
-    ax_pre_PSD = fig.add_subplot(3, 2, 3, title="presynaptic", xlabel="frequency (Hz)", ylabel="|firing rate|²/Hz")
-    mask_f = (freqs_fr < max_f) & (freqs_fr > 1)
+    ax_pre_PSD_E = fig.add_subplot(3, 2, 3, title="presynaptic E", xlabel="frequency (Hz)", ylabel="|firing rate|²/Hz")
+    # ax_pre_PSD_I = fig.add_subplot(3, 2, 5, title="presynaptic I", xlabel="frequency (Hz)", ylabel="|firing rate|²/Hz")
+    mask_f = (freqs_pop_E < max_f) & (freqs_pop_E > 1)
     # ax_pre_PSD.loglog(freqs_fr[mask_f], psd_pop[mask_f], "k")
     # for pre_psd in pre_psds:
-    ax_pre_PSD.loglog(freqs_fr[mask_f], pre_psds[mask_f], "k")
-
+    try:
+        ax_pre_PSD_E.loglog(freqs_pop_E[mask_f], psd_pop_E[mask_f], "k")
+        # ax_pre_PSD_I.loglog(freqs_pop_I[mask_f], psd_pop_I[mask_f], "k")
+    except IndexError as e:
+        print("Not plotting presynaptic firing rate PSD")
     ax_fr_PSD = fig.add_subplot(3, 2, 4, title="postsynaptic", xlabel="frequency (Hz)", ylabel="|firing rate|²/Hz")
     ax_fr_PSD.loglog(freqs_fr[mask_f], psd_fr[mask_f], "k")
 
@@ -854,12 +879,25 @@ def plot_results(results, sim_params, tlim=(5, 6), max_f=2200,
 
 def _postsynaptic_snr_from_results(results, stim_freq, firing_rate_bin_size=None,
                                    use_welch=True, welch_segments=4,
-                                   freq_window=5):
+                                   freq_window=5, freq_resolution=0.005,
+                                   band_halfwidth=0.05, ref_bandwidth=0.01):
     """Return the postsynaptic (neuron B) SNR at `stim_freq`.
 
-    The SNR is computed from the firing-rate PSD of B, exactly as in
-    ``plot_results``.  If the membrane potential was saved, the Vm SNR is
-    returned as well.
+    The SNR is computed from the firing-rate PSD of B.  With
+    `freq_resolution` given (default), the PSD is estimated with a *fixed*
+    frequency resolution (`welch_psd_fixed_resolution`), so df is identical
+    for every target_stim_dVm and every condition, and the spectral line is
+    quantified by the band-integrated measure of
+    `calculate_band_snr_and_zscore`: the reported SNR ('snr_ref') is the line
+    power divided by the noise power in the *fixed* reference bandwidth
+    `ref_bandwidth` (Hz).  Unlike the peak-bin ratio this does not scale with
+    1/df, and unlike 'snr_band_ratio' it is not compressed into 1-2 by the
+    width of the integration band -- but B_ref must be stated in the figure.
+
+    Setting ``freq_resolution=None`` restores the old behaviour (Welch with
+    `welch_segments` segments, peak-bin SNR).
+
+    If the membrane potential was saved, the Vm SNR is returned as well.
     """
     params = results["params"]
     sim_time = params["sim_time"]
@@ -869,21 +907,34 @@ def _postsynaptic_snr_from_results(results, stim_freq, firing_rate_bin_size=None
     B = results["B"]
 
     b_rate, b_bins = find_spike_rate(B["spike_times"], firing_rate_bin_size, sim_time)
-    if use_welch:
+    if freq_resolution is not None:
+        fs = 1000.0 / firing_rate_bin_size
+        freqs_fr, psd_fr = welch_psd_fixed_resolution(
+            b_rate, fs, freq_resolution=freq_resolution)
+    elif use_welch:
         fs = 1000.0 / firing_rate_bin_size
         freqs_fr, psd_fr = welch(b_rate, fs=fs,
                                  nperseg=len(b_rate) // welch_segments,
                                  noverlap=(len(b_rate) // welch_segments) // 2)
     else:
+        print("Not using Welch for SNR calculation.")
         freqs_fr, psd_fr = return_freq_and_psd(b_bins, b_rate)
         psd_fr = psd_fr[0]
 
-    snr_fr = calculate_spectral_snr_and_zscore(freqs_fr, psd_fr, stim_freq,
-                                               freq_window=freq_window)
+    if freq_resolution is not None:
+        snr_fr = calculate_band_snr_and_zscore(
+            freqs_fr, psd_fr, stim_freq, band_halfwidth=band_halfwidth,
+            freq_window=freq_window, ref_bandwidth=ref_bandwidth)
+    else:
+        snr_fr = calculate_non_welch_snr_and_zscore(freqs_fr, psd_fr, stim_freq,
+                                                   freq_window=freq_window)
+        snr_fr["snr_ref"] = snr_fr["snr_peak_ratio"]
+        snr_fr["excess_power"] = np.nan
 
     out = {
-        "snr_fr": snr_fr["snr_peak_ratio"],
+        "snr_fr": snr_fr["snr_ref"],
         "z_fr": snr_fr["z_score"],
+        "power_fr": snr_fr.get("excess_power", np.nan),
         "firing_rate": B["firing_rate"],
         "pre_fr_E": np.nan,
         "pre_fr_I": np.nan,
@@ -914,16 +965,25 @@ def _postsynaptic_snr_from_results(results, stim_freq, firing_rate_bin_size=None
 
     if "Vm" in B:
         fs_vm = 1000.0 / params["resolution"]
-        if use_welch:
+        if freq_resolution is not None:
+            freqs_vm, psd_vm = welch_psd_fixed_resolution(
+                B["Vm"], fs_vm, freq_resolution=freq_resolution)
+        elif use_welch:
             freqs_vm, psd_vm = welch(B["Vm"], fs=fs_vm,
                                      nperseg=len(B["Vm"]) // welch_segments,
                                      noverlap=(len(B["Vm"]) // welch_segments) // 2)
         else:
             freqs_vm, psd_vm = return_freq_and_psd(B["times"], B["Vm"])
             psd_vm = psd_vm[0]
-        snr_vm = calculate_spectral_snr_and_zscore(freqs_vm, psd_vm, stim_freq,
-                                                   freq_window=freq_window)
-        out["snr_Vm"] = snr_vm["snr_peak_ratio"]
+        if freq_resolution is not None:
+            snr_vm = calculate_band_snr_and_zscore(
+                freqs_vm, psd_vm, stim_freq, band_halfwidth=band_halfwidth,
+                freq_window=freq_window, ref_bandwidth=ref_bandwidth)
+            out["snr_Vm"] = snr_vm["snr_ref"]
+        else:
+            snr_vm = calculate_non_welch_snr_and_zscore(freqs_vm, psd_vm, stim_freq,
+                                                       freq_window=freq_window)
+            out["snr_Vm"] = snr_vm["snr_peak_ratio"]
         out["z_Vm"] = snr_vm["z_score"]
 
     return out
@@ -1131,6 +1191,8 @@ def collect_snr_vs_target_stim_dVm(noise_type="ou", noise_level_Vm=5.0,
                                    w=4.5, g=4.0, stim_target="both", save_dir="results",
                                    firing_rate_bin_size=None, use_welch=True,
                                    welch_segments=4, freq_window=5,
+                                   freq_resolution=0.005, band_halfwidth=0.05,
+                                   ref_bandwidth=0.01,
                                    cache_name=None, force_recompute=False):
     """Compute the postsynaptic SNR for every already simulated
     ``target_stim_dVm`` and return ``(dVm_values, snr_dict)``.
@@ -1141,10 +1203,15 @@ def collect_snr_vs_target_stim_dVm(noise_type="ou", noise_level_Vm=5.0,
     import gc
 
     target_tag = f"_{stim_target}" if stim_target not in ("both", "all", "EI", None) else ""
+    if freq_resolution is not None:
+        analysis_tag = (f"_df{freq_resolution}_band{band_halfwidth}"
+                        f"_Bref{ref_bandwidth}")
+    else:
+        analysis_tag = f"_welch{use_welch}:{welch_segments}"
     if cache_name is None:
         cache_name = (f"snr_vs_target_stim_dVm{target_tag}_{noise_type}_{noise_level_Vm}_"
                       f"{carrier_f}_{beat_f}_dt{dt}w{w}_g{g}"
-                      f"_welch{use_welch}:{welch_segments}.pkl")
+                      f"{analysis_tag}.pkl")
     cache_path = os.path.join(save_dir, cache_name)
 
     cache = {}
@@ -1181,7 +1248,9 @@ def collect_snr_vs_target_stim_dVm(noise_type="ou", noise_level_Vm=5.0,
         cache[dVm] = _postsynaptic_snr_from_results(
             saved["results"], stim_freq,
             firing_rate_bin_size=firing_rate_bin_size, use_welch=use_welch,
-            welch_segments=welch_segments, freq_window=freq_window)
+            welch_segments=welch_segments, freq_window=freq_window,
+            freq_resolution=freq_resolution, band_halfwidth=band_halfwidth,
+            ref_bandwidth=ref_bandwidth)
         updated = True
         print(f"  target_stim_dVm={dVm}: postsynaptic SNR = "
               f"{cache[dVm]['snr_fr']:.2f} (z={cache[dVm]['z_fr']:.1f}), "
@@ -1208,6 +1277,8 @@ def plot_snr_vs_target_stim_dVm(noise_type="ou", noise_level_Vm=5.0,
                                 w=4.5, g=4.0, stim_target="compare", save_dir="results",
                                 firing_rate_bin_size=None, use_welch=True,
                                 welch_segments=4, freq_window=5,
+                                freq_resolution=0.005, band_halfwidth=0.05,
+                                ref_bandwidth=0.01,
                                 plot_Vm=False, force_recompute=False):
     """Plot the postsynaptic firing rate SNR, postsynaptic firing rate, and
     presynaptic E/I population firing rates at the beat frequency as a function
@@ -1245,7 +1316,9 @@ def plot_snr_vs_target_stim_dVm(noise_type="ou", noise_level_Vm=5.0,
                 stim_target=target, save_dir=save_dir,
                 firing_rate_bin_size=firing_rate_bin_size,
                 use_welch=use_welch, welch_segments=welch_segments,
-                freq_window=freq_window, force_recompute=force_recompute)
+                freq_window=freq_window, freq_resolution=freq_resolution,
+                band_halfwidth=band_halfwidth, ref_bandwidth=ref_bandwidth,
+                force_recompute=force_recompute)
             target_data[target] = (dVm_values, snr)
         except FileNotFoundError as err:
             print(f"Skipping {target}: {err}")
@@ -1265,6 +1338,21 @@ def plot_snr_vs_target_stim_dVm(noise_type="ou", noise_level_Vm=5.0,
 
     # One shared y-axis per column (first row defines the scale).
     col_axes = {1: None, 2: None, 3: None, 4: None}
+
+    # With the band-integrated measure both the SNR and the z-score can be
+    # <= 0 (no line above the noise), which a plain log axis would drop
+    # silently, so those columns fall back to a symmetric log scale.
+    all_snr_fr = [v["snr_fr"] for _, s in target_data.values() for v in s.values()]
+    all_z_fr = [v["z_fr"] for _, s in target_data.values() for v in s.values()]
+
+    def _set_log_scale(ax, values):
+        finite = [v for v in values if np.isfinite(v)]
+        if finite and min(finite) > 0:
+            ax.set_yscale("log")
+        else:
+            pos = [abs(v) for v in finite if v != 0]
+            linthresh = min(pos) if pos else 1.0
+            ax.set_yscale("symlog", linthresh=linthresh)
 
     for row, target in enumerate(valid_targets):
         dVm_values, snr = target_data[target]
@@ -1294,13 +1382,16 @@ def plot_snr_vs_target_stim_dVm(noise_type="ou", noise_level_Vm=5.0,
         fr = [snr[d]["firing_rate"] for d in dVm_values]
         ax_fr.plot(dVm_values, fr, color="k", marker="o", linestyle="-")
 
-        # Column 3: SNR peak ratio
+
+        # Column 3: band-integrated SNR against a fixed reference bandwidth
+        snr_label = (f"SNR (B$_\\mathrm{{ref}}$ = {ref_bandwidth:g} Hz)"
+                     if freq_resolution is not None else "SNR (peak ratio)")
         ax_snr = fig.add_subplot(n_rows, n_cols, row * n_cols + 3,
                                  xlabel=r"target stim d$V_{\rm m}$ (mV)",
-                                 ylabel="SNR (peak ratio)",
-                                 yscale="log",
+                                 ylabel=snr_label,
                                  sharey=col_axes[3])
         col_axes[3] = col_axes[3] or ax_snr
+        _set_log_scale(ax_snr, all_snr_fr)
         ax_snr.set_title(target_label, fontsize=9)
         snr_fr = [snr[d]["snr_fr"] for d in dVm_values]
         ax_snr.plot(dVm_values, snr_fr, color="k", marker="o", linestyle="-")
@@ -1309,12 +1400,15 @@ def plot_snr_vs_target_stim_dVm(noise_type="ou", noise_level_Vm=5.0,
         ax_z = fig.add_subplot(n_rows, n_cols, row * n_cols + 4,
                                xlabel=r"target stim d$V_{\rm m}$ (mV)",
                                ylabel="z-score",
-                               yscale="log",
-                               sharey=col_axes[4])
+                               sharey=col_axes[4], sharex=col_axes[3],
+                               ylim=[-2, 25])
         col_axes[4] = col_axes[4] or ax_z
+        # _set_log_scale(ax_z, all_z_fr)
         ax_z.set_title(target_label, fontsize=9)
         z_fr = [snr[d]["z_fr"] for d in dVm_values]
         ax_z.plot(dVm_values, z_fr, color="k", marker="o", linestyle="-")
+
+        print(dVm_values, z_fr)
 
         # Keep the y tick labels in every row, even though the y-axes are shared.
         for ax_ in (ax_pre, ax_fr, ax_snr, ax_z):
@@ -1324,9 +1418,14 @@ def plot_snr_vs_target_stim_dVm(noise_type="ou", noise_level_Vm=5.0,
     mark_subplots(fig.axes, ypos=1.05)
     os.makedirs("figures", exist_ok=True)
     target_tag = "_".join(valid_targets) if len(valid_targets) > 1 else valid_targets[0]
+    if freq_resolution is not None:
+        analysis_tag = (f"_df{freq_resolution}_band{band_halfwidth}"
+                        f"_Bref{ref_bandwidth}")
+    else:
+        analysis_tag = ""
     out_name = join("figures",
                     f"snr_vs_target_stim_dVm_{target_tag}_{noise_type}_{noise_level_Vm}_"
-                    f"{carrier_f}_{beat_f}_dt{dt}w{w}_g{g}.pdf")
+                    f"{carrier_f}_{beat_f}_dt{dt}w{w}_g{g}{analysis_tag}.pdf")
     plt.savefig(out_name, dpi=150)
     print(f"Saved figure to '{out_name}'")
     return fig
@@ -1345,7 +1444,7 @@ if __name__ == "__main__":
 
     # Set to True to only plot the postsynaptic SNR as a function of
     # target_stim_dVm for all already simulated values (no new simulation).
-    snr_vs_dVm_only = True
+    snr_vs_dVm_only = False
 
     if snr_vs_dVm_only:
         for g in [4.0]:
@@ -1363,6 +1462,11 @@ if __name__ == "__main__":
                         save_dir="results",
                         use_welch=True,
                         welch_segments=4,
+                        # Fixed-resolution, band-integrated SNR (as in Fig. 1
+                        # and Fig. 2). B_ref must be stated in the caption.
+                        freq_resolution=0.005,
+                        band_halfwidth=0.05,
+                        ref_bandwidth=0.01,
                     )
                 except FileNotFoundError as err:
                     print(f"Skipping plot for g={g}, stim_target={stim_target}: {err}")
@@ -1370,8 +1474,8 @@ if __name__ == "__main__":
 
 
     for g in [4.0]:
-        for stim_target in ["E", "both"]:
-            for target_stim_dVm in [0.0]:
+        for stim_target in ["E",]:
+            for target_stim_dVm in [0.03]:
 
                 # Run single-neuron simulation with selective stimulation:
                 results = run_single_neuron_selective_stim(
@@ -1410,7 +1514,8 @@ if __name__ == "__main__":
                     dt=dt,
                 )
 
-                plot_results(results, pop_sim_params, tlim=(3.8, 4.2), use_welch=True,
+                plot_results(results, pop_sim_params, tlim=(3.8, 4.2),
+                             use_welch=False,
                              welch_segments=4)
 
 
@@ -1427,7 +1532,10 @@ if __name__ == "__main__":
                     g=g,
                     stim_target=stim_target,
                     save_dir="results",
-                    use_welch=True,
+                    use_welch=False,
+                    freq_resolution=None,
+                    freq_window=5,
+                    band_halfwidth=None,
                     welch_segments=4,
                 )
             except FileNotFoundError as err:

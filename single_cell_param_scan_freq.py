@@ -34,11 +34,14 @@ from single_cell_simulations import (
     mark_subplots
 )
 # analyze_firing_rate is identical to the one used by the strength/noise scan.
-from single_cell_param_scan import analyze_firing_rate
+from single_cell_param_scan import (analyze_firing_rate, _octave_levels,
+                                    snr_ref_from_band_ratio)
 
 
 def run_param_scan(carrier_freqs, beat_freqs, const_params,
                    firing_rate_bin_size=None, use_welch=False, welch_segments=4,
+                   freq_resolution=0.005, band_halfwidth=0.05,
+                   freq_window=5.0, ref_bandwidth=0.01,
                    save_dir="results/param_scan_freq"):
     """Run the 2D carrier x beat scan and return (firing_rate, fr_power, fr_SNR).
 
@@ -78,13 +81,17 @@ def run_param_scan(carrier_freqs, beat_freqs, const_params,
             power, snr, snr2 = analyze_firing_rate(
                 results, const_params["sim_time"], beat,
                 use_welch=use_welch, welch_segments=welch_segments,
-                bin_size=firing_rate_bin_size)
+                bin_size=firing_rate_bin_size,
+                freq_resolution=freq_resolution,
+                band_halfwidth=band_halfwidth,
+                freq_window=freq_window,
+                ref_bandwidth=ref_bandwidth)
 
             firing_rate[i, j] = results["firing_rate"]
             fr_power[i, j] = power
-            fr_SNR[i, j] = snr2["snr_peak_ratio"]
+            fr_SNR[i, j] = snr2["snr_ref"]
             fr_z_score[i, j] = snr2["z_score"]
-            print("comparison old, new SNR: ", snr, snr2["snr_peak_ratio"])
+            print("comparison old, ref SNR: ", snr, snr2["snr_ref"])
             print("z_score: ", snr2["z_score"])
 
     return firing_rate, fr_power, fr_SNR, fr_z_score
@@ -93,7 +100,8 @@ def run_param_scan(carrier_freqs, beat_freqs, const_params,
 def plot_param_scan(firing_rate, fr_power, fr_SNR, fr_z_score,
                     carrier_freqs, beat_freqs,
                     save_name="param_scan_freq.png",
-                    snr_levels=None, n_levels=14):
+                    snr_levels=None, fr_power_levels=None, n_levels=14,
+                    ref_bandwidth=0.01):
     """Plot the three scan matrices as filled contour panels (contourf).
 
     Carrier frequency is placed on the x-axis and beat frequency on the y-axis.
@@ -104,16 +112,21 @@ def plot_param_scan(firing_rate, fr_power, fr_SNR, fr_z_score,
     colour scale is matched to them, with labelled contour lines overlaid); it
     defaults to a log-spaced set if not given. The firing-rate and power panels
     use `n_levels` automatically-placed levels."""
+    # Octave-spaced levels spanning the data: the power and SNR panels now show
+    # resolution-independent band-integrated measures (see
+    # analyze_firing_rate), whose absolute scale depends on the firing rate, so
+    # the levels are derived from the data rather than hard-coded.
     if snr_levels is None:
-        snr_levels = np.arange(20)[::2]
-
-    fr_levels = np.linspace(3.2, 3.5, 7)#[3.2, 3.25, 3.3, 3.35, 3.4]
-    fr_psd_levels = np.linspace(0, 360, 11)
-    #fr_levels = np.arange(110)[::10]
+        # snr_ref = 0 means "no line", so (unlike the band ratio) there is no
+        # natural floor at 1; the level range is capped by _octave_levels.
+        snr_levels = _octave_levels(fr_SNR)
+    if fr_power_levels is None:
+        fr_power_levels = _octave_levels(fr_power)
+    fr_levels = np.linspace(np.nanmin(firing_rate), np.nanmax(firing_rate), 7)
+    fr_psd_levels = np.asarray(fr_power_levels, dtype=float)
+    snr_levels = np.asarray(snr_levels, dtype=float)
 
     z_score_levels = np.linspace(0, 150, 11)
-
-    snr_levels = np.linspace(0, 50, 11)
 
     # Grid of data coordinates: x = carrier frequency, y = beat frequency. Each
     # matrix is transposed from [carrier, beat] to [beat, carrier] to match
@@ -124,8 +137,10 @@ def plot_param_scan(firing_rate, fr_power, fr_SNR, fr_z_score,
     # a logarithmic colour scale; the others use automatic linear levels.
     panels = [
         (firing_rate, "firing rate (Hz)", fr_levels, False, "Hz"),
-        (fr_power, "firing-rate power at beat frequency", fr_psd_levels, False, "|firing rate|²/Hz"),
-        (fr_SNR, "firing-rate SNR at beat frequency", snr_levels, False, ''),
+        (fr_power, "firing-rate power at beat frequency", fr_psd_levels, True, "(spikes/s)²"),
+        (fr_SNR, "firing-rate SNR at beat frequency\n"
+                 f"(B$_\\mathrm{{ref}}$ = {ref_bandwidth:g} Hz)",
+         snr_levels, True, ''),
         # (fr_z_score, "z-score for peak at beat frequency", z_score_levels, False, ''),
     ]
 
@@ -141,10 +156,11 @@ def plot_param_scan(firing_rate, fr_power, fr_SNR, fr_z_score,
             # Match the colour normalisation to the manual level range; extend
             # both ends so out-of-range cells still get the end colours.
             norm = LogNorm(vmin=levels[0], vmax=levels[-1])
-            cf = ax.contourf(X, Y, Z, levels=levels, norm=norm, cmap="PuBuGn_r",
+            cf = ax.contourf(X, Y, np.abs(Z), levels=levels, norm=norm, cmap="PuBuGn_r",
                              extend="both")
             # Overlay labelled contour lines for readability.
-            cl = ax.contour(X, Y, Z, levels=levels, colors="k", linewidths=0.4)
+            cl = ax.contour(X, Y, np.abs(Z), levels=levels, colors="k",
+                            linewidths=0.4, extend="both")
             ax.clabel(cl, fmt="%g", fontsize=10)
         else:
             cf = ax.contourf(X, Y, Z, levels=levels, cmap="PuBuGn_r")
@@ -160,7 +176,7 @@ def plot_param_scan(firing_rate, fr_power, fr_SNR, fr_z_score,
         if log_scale:
             cbar = fig.colorbar(cf, ax=ax, fraction=0.046, pad=0.04)
             cbar.set_ticks(levels)
-            cbar.set_ticklabels([f"{int(l)}" for l in levels])
+            cbar.set_ticklabels([f"{l:g}" for l in levels])
 
         else:
             cbar = fig.colorbar(cf, ax=ax, fraction=0.046, pad=0.04, label="")
@@ -203,10 +219,24 @@ if __name__ == "__main__":
     beat_freqs = np.linspace(10, 100, 10)         # Hz
 
     rerun_scan = False
-    welch_addon = f"_welch_{welch_segments}" if use_welch else ""
+    # Fixed frequency resolution (df) + band-integrated SNR/z-score, which is
+    # independent of df (see calculate_band_snr_and_zscore), as in Fig. 1.
+    freq_resolution = 0.005
+    band_halfwidth = 0.05
+    # Reference noise bandwidth for the SNR panel (must be stated in the
+    # caption); the line power is compared with the noise power in B_ref.
+    ref_bandwidth = 0.01
+    if freq_resolution is not None:
+        welch_addon = f"_df{freq_resolution}_band{band_halfwidth}"
+    else:
+        welch_addon = f"_welch_{welch_segments}" if use_welch else ""
     if rerun_scan:
         firing_rate, fr_power, fr_SNR, fr_z_score = run_param_scan(
-            carrier_freqs, beat_freqs, const_params, use_welch=use_welch, welch_segments=welch_segments)
+            carrier_freqs, beat_freqs, const_params, use_welch=use_welch,
+            welch_segments=welch_segments,
+            freq_resolution=freq_resolution,
+            band_halfwidth=band_halfwidth,
+            ref_bandwidth=ref_bandwidth)
 
 
         # Store the matrices (with their axes) for later reuse.
@@ -217,6 +247,7 @@ if __name__ == "__main__":
                  firing_rate=firing_rate,
                  fr_power=fr_power,
                  fr_SNR=fr_SNR,
+                 ref_bandwidth=ref_bandwidth,
                  fr_z_score=fr_z_score,)
     else:
         # Load the matrices (and their axes) from the previously saved scan.
@@ -228,9 +259,21 @@ if __name__ == "__main__":
             fr_power = data["fr_power"]
             fr_SNR = data["fr_SNR"]
             fr_z_score = data["fr_z_score"]
+            stored_ref_bandwidth = (float(data["ref_bandwidth"])
+                                    if "ref_bandwidth" in data else None)
         print(f"Loaded scan matrices from '{matrix_path}'")
+        if stored_ref_bandwidth is None and freq_resolution is not None:
+            # Older files stored snr_band_ratio; convert to the fixed-reference
+            # bandwidth SNR instead of re-running the scan.
+            fr_SNR = snr_ref_from_band_ratio(
+                fr_SNR, band_halfwidth=band_halfwidth,
+                freq_resolution=freq_resolution,
+                ref_bandwidth=ref_bandwidth)
+            print(f"Converted stored snr_band_ratio to snr_ref "
+                  f"(B_ref = {ref_bandwidth} Hz)")
 
     plot_param_scan(firing_rate, fr_power, fr_SNR, fr_z_score,
                     carrier_freqs, beat_freqs,
                     n_levels=6,
+                    ref_bandwidth=ref_bandwidth,
                     save_name=f"param_scan_freq_dt:{dt}{welch_addon}.pdf")
