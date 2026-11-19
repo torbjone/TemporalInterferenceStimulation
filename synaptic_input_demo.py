@@ -36,8 +36,10 @@ from scipy.signal import welch
 
 from single_cell_simulations import (
     find_noise_std,
-    calculate_spectral_snr_and_zscore,
+    calculate_non_welch_snr_and_zscore,
+    return_freq_and_psd,
     simplify_axes,
+    _apply_nb_style
 )
 
 CUTOFF = 1000  # ms of initial transient discarded from the recordings
@@ -116,10 +118,10 @@ def generate_input_spike_trains(sim_time=10e3,
     nest.rng_seed = seed
 
     recorders = []
-    for f in input_freqs:
+    for i_, f in enumerate(input_freqs):
         spg = nest.Create("sinusoidal_poisson_generator", params={
-            "rate": input_rate,
-            "amplitude": input_ampl,
+            "rate": input_rate[i_],
+            "amplitude": input_ampl[i_],
             "frequency": f,
             "phase": 0.0,
         })
@@ -307,8 +309,8 @@ def run_synaptic_input_simulation(inputs,
 
 
 def plot_synaptic_input_results(case_results, input_freqs, resolution,
-                                fig_name, tlim=(1.0, 2.0), max_f=5000,
-                                welch_segments=8, snr_window=5):
+                                fig_name, tlim=(1.0, 2.0), max_f=3000,
+                                welch_segments=4, snr_window=5):
     """Plot the Vm traces of all cases in the top row, and below one row per
     case with the PSD of the synaptic input current (left) and the membrane
     potential (right). The reference case (first entry) is drawn in light
@@ -323,6 +325,18 @@ def plot_synaptic_input_results(case_results, input_freqs, resolution,
     colors = ["k", "tab:blue", "tab:orange", "tab:green", "tab:red",
               "tab:purple", "tab:brown"]
 
+    input_freqs = [20, 2000]
+
+    def _psd_non_welch(sig):
+        freqs, psd = return_freq_and_psd(resolution, sig)
+        psd = psd[0]
+        #nperseg = len(sig) // welch_segments
+        #freqs, psd = welch(sig, fs=1000. / resolution,
+                           # nperseg=nperseg, noverlap=nperseg // 2)
+        mask = (freqs > 0) & (freqs < max_f)
+        return freqs[mask], psd[mask]
+
+
     def _psd(sig):
         nperseg = len(sig) // welch_segments
         freqs, psd = welch(sig, fs=1000. / resolution,
@@ -330,6 +344,8 @@ def plot_synaptic_input_results(case_results, input_freqs, resolution,
         mask = (freqs > 0) & (freqs < max_f)
         return freqs[mask], psd[mask]
 
+
+    # psds = [(_psd_non_welch(res["I_syn"]), _psd_non_welch(res["Vm"])) for _, res in case_results]
     psds = [(_psd(res["I_syn"]), _psd(res["Vm"])) for _, res in case_results]
 
     n_cases = len(case_results)
@@ -341,14 +357,40 @@ def plot_synaptic_input_results(case_results, input_freqs, resolution,
     # --- Top row: Vm of all cases ---------------------------------------------
     ax_vm = fig.add_subplot(gs[0, :], xlabel="time (s)", ylabel=r"$V_{\rm m}$ (mV)",
                             xlim=tlim,
-                            title="Membrane potential, identical synaptic input "
-                                  "(locked to " +
-                                  " and ".join(f"{f:.0f} Hz" for f in input_freqs) + ")")
+                            #title="Membrane potential, identical synaptic input "
+                            #      "(locked to " +
+                            #      " and ".join(f"{f:.0f} Hz" for f in input_freqs) + ")"
+                            )
+    ax_vm.axis("off")
+    vm_ylim = (-71, -55)
+    amp_scale_mV = 10.0
+    time_scale_ms = 50.0
+    _NB_TEAL = "#006D5B"
+    x_span = tlim[1] - tlim[0]
+    y_span = vm_ylim[1] - vm_ylim[0]
+    x0 = tlim[0] + 0.02 * x_span
+    y0 = vm_ylim[0] + 0.10 * y_span - 2
+    t_len = time_scale_ms / 1000.0  # ms -> s (x-axis is in seconds)
+    ax_vm.plot([x0, x0 + t_len], [y0, y0], color=_NB_TEAL, lw=2.5,
+               solid_capstyle="butt")
+    ax_vm.text(x0 + t_len / 2, y0 - 0.03 * y_span, f"{time_scale_ms:.0f} ms",
+               ha="center", va="top", color=_NB_TEAL, fontsize=11)
+    ax_vm.plot([x0, x0], [y0, y0 + amp_scale_mV], color=_NB_TEAL, lw=2.5,
+               solid_capstyle="butt")
+    ax_vm.text(x0 - 0.015 * x_span, y0 + amp_scale_mV / 2,
+               f"{amp_scale_mV:.0f} mV", ha="right", va="center",
+               rotation=90, color=_NB_TEAL, fontsize=11)
+
+    ax_vm.text(tlim[0] + 2, -57,
+               r"$V_{\rm m}$", ha="center", va="top")
+
+
+
     for i, (label, res) in enumerate(case_results):
         t = res["times"] / 1000
         m = (t >= tlim[0]) & (t <= tlim[1])
         ax_vm.plot(t[m], res["Vm"][m], color=colors[i], lw=0.7,
-                   label=f"{label} ({res['firing_rate']:.2f} Hz)")
+                   label=f"{label}")
         sp = res["spike_times"] / 1000
         sp = sp[(sp >= tlim[0]) & (sp <= tlim[1])]
         if len(sp):
@@ -363,13 +405,14 @@ def plot_synaptic_input_results(case_results, input_freqs, resolution,
                                             ("Membrane potential", r"mV$^2$/Hz")]):
             ax = fig.add_subplot(gs[i + 1, col], xlim=[1, max_f],
                                  ylabel=unit, title=f"{name}: {label}")
+            _apply_nb_style(ax)
             if i == n_cases - 1:
                 ax.set_xlabel("frequency (Hz)")
-            for f in input_freqs:
-                ax.axvline(f, lw=0.5, ls="--", color="gray")
-            if i > 0:
-                f_ref, p_ref = psds[0][col]
-                ax.loglog(f_ref, p_ref, color="0.75", lw=1.0, label=case_results[0][0])
+            # for f in input_freqs:
+            #     ax.axvline(f, lw=0.5, ls="--", color="gray")
+            # if i > 0:
+            #     f_ref, p_ref = psds[0][col]
+            #     ax.loglog(f_ref, p_ref, color="0.75", lw=1.0, label=case_results[0][0])
             freqs, psd = psds[i][col]
             ax.loglog(freqs, psd, color=colors[i], lw=0.8, label=label)
             if i > 0:
@@ -377,8 +420,8 @@ def plot_synaptic_input_results(case_results, input_freqs, resolution,
 
             snr_text = []
             for f in input_freqs:
-                snr = calculate_spectral_snr_and_zscore(freqs, psd, f, freq_window=snr_window)
-                snr_text.append(f"SNR @ {f:.0f} Hz: {snr['snr_peak_ratio']:.1f}")
+                snr = calculate_non_welch_snr_and_zscore(freqs, psd, f, freq_window=snr_window)
+                snr_text.append(f"SNR({f:.0f} Hz): {snr['snr_peak_ratio']:.1f}")
                 print(f"{label} | {name} | SNR @ {f:.0f} Hz: {snr['snr_peak_ratio']:.2f} "
                       f"(z-score {snr['z_score']:.1f})")
             ax.text(0.99, 0.97, "\n".join(snr_text), transform=ax.transAxes,
@@ -401,8 +444,8 @@ if __name__ == "__main__":
     input_params = dict(
         sim_time=sim_time,
         input_freqs=(20.0, 2000.0),
-        input_rate=10.0,
-        input_ampl=5.0,
+        input_rate=(10.0, 0.0),
+        input_ampl=(5.0, 50.0),
         n_inputs=50,
         seed=2,
         resolution=dt,
@@ -427,11 +470,11 @@ if __name__ == "__main__":
     )
     # Each case is the reference with one individual modification.
     cases = [
-        ("reference", {}),
+        ("clean reference", {}),
         #(r"$\tau_{\rm syn}$ = 2 ms", {"tau_syn": 2.0}),
-        ("delay std = 0.25 ms", {"syn_delay_std": 0.25}),
+        ("synaptic delay std = 0.25 ms", {"syn_delay_std": 1}),
         (r"$V_{\rm m}$ noise = 0.05 mV", {"noise_level_Vm": 0.05}),
-        (r"$V_{\rm th}$ = -50 mV", {"V_th": -50.}),
+        (r"with spikes", {"V_th": -50.}),
     ]
 
     case_results = []

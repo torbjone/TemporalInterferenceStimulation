@@ -621,21 +621,20 @@ def plot_pop_size_duration_scan(snr, z_score, pop_sizes, durations,
                 print("DIDN'T WORK!")
                 pass
 
-    fig = plt.figure(figsize=(8, 7))
-    fig.subplots_adjust(hspace=0.3, wspace=0.3, left=0.05, right=0.95, bottom=0.05, top=0.95)
+    fig = plt.figure(figsize=(10, 2.7))
+    fig.subplots_adjust(hspace=0.3, wspace=0.5, left=0.07, right=0.98, bottom=0.17, top=0.9)
 
     if psd_net is not None:
-        ax_psd = fig.add_subplot(2, 2, 1, xlabel="frequency (Hz)", ylabel="PSD (|firing rate|²/Hz)")
+        ax_psd = fig.add_subplot(1, 4, 1, xlabel="frequency (Hz)", ylabel="PSD (|firing rate|²/Hz)")
         mask = (freqs_net > 1) & (freqs_net < 2200)
         ax_psd.loglog(freqs_net[mask], psd_net[mask], c='k')
 
 
-    ax = fig.add_subplot(2, 2, 3)
-    ax_pop_size = fig.add_subplot(2, 2, 2, xlabel="number of neurons", ylabel="SNR")
-    ax_duration = fig.add_subplot(2, 2, 4, xlabel="duration (s)", ylabel="SNR")
+    ax = fig.add_subplot(1, 4, 2)
+    ax_pop_size = fig.add_subplot(1, 4, 3, xlabel="number of neurons", ylabel="SNR")
+    ax_duration = fig.add_subplot(1, 4, 4, xlabel="duration (s)", ylabel="SNR")
 
     #fig, axes = plt.subplots(1, 2, figsize=(10, 4.4))
-    fig.subplots_adjust(wspace=0.45, left=0.09, right=0.98, bottom=0.09, top=0.96)
     # for ax, (matrix, title, levels) in zip(axes, panels):
 
     Z = snr.T
@@ -652,7 +651,7 @@ def plot_pop_size_duration_scan(snr, z_score, pop_sizes, durations,
 
     ax.set_xscale("log")
     ax.set_yscale("log")
-    ax.set_title(f"firing-rate SNR at {analysis_freq:.0f} Hz")
+    #ax.set_title(f"firing-rate SNR at {analysis_freq:.0f} Hz")
     ax.set_xlabel("number of neurons")
     ax.set_ylabel("duration (s)", labelpad=-2)
     cbar = fig.colorbar(cf, ax=ax, fraction=0.046, pad=0.04)
@@ -671,11 +670,11 @@ def plot_pop_size_duration_scan(snr, z_score, pop_sizes, durations,
         ax_duration.loglog(durations, snr[s_idx, :], label=f"$N$={pop_size:.0f}",
                            c=plt.cm.Grays(0.2 + s_ / (len(dur_idxs)-1)))
 
-    ax_pop_size.legend(loc="upper left", frameon=False, ncols=1)
-    ax_duration.legend(loc="upper left", frameon=False, ncols=1)
+    ax_pop_size.legend(loc=(0.1, 0.8), frameon=False, ncols=1)
+    ax_duration.legend(loc=(0.1, 0.8), frameon=False, ncols=1)
 
     simplify_axes([ax_psd, ax, ax_pop_size, ax_duration])
-    mark_subplots([ax_psd, ax, ax_pop_size, ax_duration], ypos=1.05)
+    mark_subplots([ax_psd, ax, ax_pop_size, ax_duration], ypos=1.05, xpos=-0.05)
     for ax in [ax_psd, ax, ax_pop_size, ax_duration]:
         _apply_nb_style(ax)
     os.makedirs("figures", exist_ok=True)
@@ -747,7 +746,7 @@ if __name__ == "__main__":
     durations = np.array([1, 2, 5, 10, 20, 50, 100, 200, 500, 1000])  # s
 
 
-    rerun_analysis = True
+    rerun_analysis = False
     matrix_path = join("results", "pop_scan", f"{sim_params['sim_name']}_matrices.npz")
     if rerun_analysis or not os.path.isfile(matrix_path):
         results = run_network_simulation(**sim_params)

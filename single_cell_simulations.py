@@ -1283,7 +1283,7 @@ def plot_combined_single_cell_examples(fig_1_list, max_f=2200, tlim=[6, 6.2],
         ax_vm_psd = fig.add_subplot(gs[row + 1, :2], xlim=[1, max_f], xlabel="frequency [Hz]",
                                     ylabel=r"PSD [$\mathrm{mV}^2/\mathrm{Hz}$]", ylim=[1e-6, 1e1])
         ax_fr_psd = fig.add_subplot(gs[row + 1, 2:], xlim=[1, max_f], xlabel="frequency [Hz]",
-                                    ylabel=r"PSD [$\mathrm{spikes}^2/\mathrm{Hz}$]", ylim=[3e0, 1e3])
+                                    ylabel=r"PSD [$\mathrm{spikes}^2/\mathrm{Hz}$]", ylim=[1e-1, 1e3])
 
         results = run_single_cell_simulation(**sim_params)
 
@@ -1316,10 +1316,10 @@ def plot_combined_single_cell_examples(fig_1_list, max_f=2200, tlim=[6, 6.2],
 
         # Band-integrated SNR/z-score (resolution independent, see
         # calculate_band_snr_and_zscore).
-        fr_SNR_res = calculate_band_snr_and_zscore(
-            freqs_fr, fr_psd, stim_freq, band_halfwidth=band_halfwidth,
+        fr_SNR_res = calculate_non_welch_snr_and_zscore(
+            freqs_fr, fr_psd, stim_freq, #band_halfwidth=band_halfwidth,
             freq_window=freq_window)
-        fr_SNR = fr_SNR_res['snr_band_ratio']
+        fr_SNR = fr_SNR_res['snr_peak_ratio']
         fr_z_score = fr_SNR_res['z_score']
 
         if have_vm:
@@ -1333,11 +1333,11 @@ def plot_combined_single_cell_examples(fig_1_list, max_f=2200, tlim=[6, 6.2],
             else:
                 freqs_vm, vm_psd = welch(results["Vm"], fs=fs, nperseg=len(results["Vm"]) // psd_segments,
                                           noverlap=(len(results["Vm"]) // psd_segments) // 2)
-            vm_SNR_res = calculate_band_snr_and_zscore(
-                freqs_vm, vm_psd, stim_freq, band_halfwidth=band_halfwidth,
+            vm_SNR_res = calculate_non_welch_snr_and_zscore(
+                freqs_vm, vm_psd, stim_freq,
                 freq_window=freq_window)
             vm_z_score = vm_SNR_res['z_score']
-            vm_SNR = vm_SNR_res['snr_band_ratio']
+            vm_SNR = vm_SNR_res['snr_peak_ratio']
 
         #ax_fr_psd.set_title(f"{sim_name} - PSD of fr: SNR at {stim_freq:.0f} Hz = {fr_SNR:.2f}; z-score = {fr_z_score:.2f}")
 
@@ -1350,15 +1350,17 @@ def plot_combined_single_cell_examples(fig_1_list, max_f=2200, tlim=[6, 6.2],
             print(f"{sim_name} - PSD of Vm: band SNR at {stim_freq:.0f} Hz = "
                   f"{vm_SNR:.2f} (z = {vm_z_score:.1f}, "
                   f"p = {vm_SNR_res['p_value']:.3g}, "
-                  f"df = {vm_SNR_res['df']:.3g} Hz, "
-                  f"{vm_SNR_res['n_band_bins']} band bins, "
-                  f"{vm_SNR_res['n_control_bands']} control bands)")
+                  # f"df = {vm_SNR_res['df']:.3g} Hz, "
+                  # f"{vm_SNR_res['n_band_bins']} band bins, "
+                  # f"{vm_SNR_res['n_control_bands']} control bands)"
+            )
         print(f"{sim_name} - PSD of firing rate: band SNR at {stim_freq:.0f} Hz = "
               f"{fr_SNR:.2f} (z = {fr_z_score:.1f}, "
-              f"p = {fr_SNR_res['p_value']:.3g}, "
-              f"df = {fr_SNR_res['df']:.3g} Hz, "
-              f"{fr_SNR_res['n_band_bins']} band bins, "
-              f"{fr_SNR_res['n_control_bands']} control bands)")
+              # f"p = {fr_SNR_res['p_value']:.3g}, "
+              # f"df = {fr_SNR_res['df']:.3g} Hz, "
+              # f"{fr_SNR_res['n_band_bins']} band bins, "
+              # f"{fr_SNR_res['n_control_bands']} control bands)"
+              )
 
         # --- Top panel: overlaid Vm traces + per-entry spike raster ----------
         if have_vm:
@@ -1744,7 +1746,7 @@ if __name__ == "__main__":
         resolution=dt,
         sim_name=f"Fig1G-I_dt:{dt}_{carrier_f}_{beat_f}_{noise_type}",
         force_rerun=force_rerun,
-        description="1000 Hz stimulation",
+        description=f"{int(carrier_f)} Hz stimulation",
         save_Vm="full",
         noise_type=noise_type,
     )
@@ -1820,13 +1822,14 @@ if __name__ == "__main__":
 
     # Fixed frequency resolution (df) + band-integrated SNR/z-score, which is
     # independent of df (see calculate_band_snr_and_zscore).
-    freq_resolution = 0.005
-    band_halfwidth = 0.05
+    freq_resolution = None #0.005
+    band_halfwidth = None #0.05
     plot_combined_single_cell_examples(fig_1_list,
                                       freq_resolution=freq_resolution,
                                       band_halfwidth=band_halfwidth,
                                       firing_rate_bin_size=dt,
                                       tlim = [3.800, 4.200],
+                                      psd_segments=4,
                                       save_name=f"Fig1_combined_df{freq_resolution}_band{band_halfwidth}.pdf")
 
     # plot_compare_Vms(fig_1_list)
